@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 )
@@ -107,10 +106,7 @@ func runWithGameCommand(logger *slog.Logger, server *http.Server, cfg Config, se
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	cmd.Env = os.Environ()
-
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	configureCommand(cmd)
 
 	if err := cmd.Start(); err != nil {
 		logger.Error("failed to start game command", "error", err)
@@ -195,36 +191,6 @@ func waitForServer(listen string, timeout time.Duration) error {
 		return errors.New("timeout")
 	}
 	return lastErr
-}
-
-func stopProcess(process *os.Process, logger *slog.Logger) {
-	if process == nil {
-		return
-	}
-
-	logger.Info("stopping process", "pid", process.Pid)
-
-	if runtime.GOOS == "windows" {
-		_ = process.Signal(os.Interrupt)
-		return
-	}
-
-	pgid, err := syscall.Getpgid(process.Pid)
-	if err == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	} else {
-		logger.Warn("failed to find process group, signaling process only", "error", err)
-		_ = process.Signal(syscall.SIGTERM)
-	}
-
-	time.Sleep(3 * time.Second)
-	if err := process.Signal(syscall.Signal(0)); err == nil {
-		if pgid, pgidErr := syscall.Getpgid(process.Pid); pgidErr == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		} else {
-			_ = process.Kill()
-		}
-	}
 }
 
 func processExitCode(err error) int {

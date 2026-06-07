@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.target.name }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: server-linux-amd64
+            package: server
+            goos: linux
+            goarch: amd64
+            binary: vrc-video-proxy-server
+            archive: tar.gz
+          - name: server-linux-arm64
+            package: server
+            goos: linux
+            goarch: arm64
+            binary: vrc-video-proxy-server
+            archive: tar.gz
+          - name: server-windows-amd64
+            package: server
+            goos: windows
+            goarch: amd64
+            binary: vrc-video-proxy-server.exe
+            archive: zip
+          - name: server-windows-arm64
+            package: server
+            goos: windows
+            goarch: arm64
+            binary: vrc-video-proxy-server.exe
+            archive: zip
+          - name: wrapper-windows-amd64
+            package: wrapper
+            goos: windows
+            goarch: amd64
+            binary: yt-dlp.exe
+            archive: zip
+          - name: wrapper-windows-arm64
+            package: wrapper
+            goos: windows
+            goarch: arm64
+            binary: yt-dlp.exe
+            archive: zip
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.target.goos }}
+      GOARCH: ${{ matrix.target.goarch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.target.name }}"
+          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.target.name }}/${{ matrix.target.binary }}" "./${{ matrix.target.package }}"
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          if [ "${{ matrix.target.archive }}" = "zip" ]; then
+            (cd "dist/${{ matrix.target.name }}" && zip -9 -r "../../release/${{ matrix.target.name }}.zip" .)
+          else
+            tar -C "dist/${{ matrix.target.name }}" -czf "release/${{ matrix.target.name }}.tar.gz" .
+          fi
+
+      - name: Generate checksum
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum * > "${{ matrix.target.name }}.sha256")
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target.name }}
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate combined checksum file
+        run: |
+          set -euo pipefail
+          cd release
+          cat *.sha256 > sha256sums.txt
+          rm *.sha256
+          sha256sum -c sha256sums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/sha256sums.txt

@@ -1,0 +1,7 @@
+# Built binaries (do not commit)
+vrc-video-proxy
+yt-dlp.exe
+
+# Local cache / scratch
+/cache/
+*.part

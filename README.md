@@ -69,11 +69,17 @@ extracted for the user's requested `url` — it is not an open redirect or open 
   connections; this is a known caveat.
 - In-progress (sparse) downloads are **not resumed across restarts** — `tmp/` is
   cleared on startup; only finished `<id>.mp4` files persist.
-- Only single-file progressive streams are cached. HLS/DASH that require muxing are
-  not handled yet (that needs the future ffmpeg step).
+- Only single-file progressive streams are cached.
 - **Transcoding is not performed yet:** the raw progressive stream is cached as-is,
   so `faststart`/`moov`-at-front depends on the upstream file (`VRCVP_FFMPEG_PATH`
   is reserved for a future transcode step; `ffmpeg` is not required to run).
+
+## Planned features
+
+- [ ] HLS/DASH live streams, including Twitch-style live URLs.
+- [ ] ffmpeg-based remuxing/transcoding pipeline.
+- [ ] Separate audio/video stream support.
+- [ ] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
 
 ## Build
 

@@ -105,7 +105,7 @@ The kind of source decides the serving path:
 - [x] ffmpeg-based remuxing/transcoding pipeline.
 - [ ] Separate audio/video stream support (muxing two distinct tracks; today
   remux/transcode operates on a single combined input).
-- [ ] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
+- [x] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
 
 ## Build
 
@@ -133,8 +133,13 @@ Priority: command-line flags > environment variables > defaults.
 | `VRCVP_SECRET`            | `--secret`         | (random per process)                 | Secret for signing manifest/segment URLs. Set a fixed value if exposing the proxy publicly so tokens survive restarts. |
 | `VRCVP_SEGMENT_CACHE_TTL` | `--segment-cache-ttl` | `5m`                              | In-memory live HLS/DASH segment cache TTL. |
 | `VRCVP_SEGMENT_CACHE_SIZE`| `--segment-cache-size`| `512`                             | In-memory live HLS/DASH segment cache entry count. |
+| `VRCVP_LOG_LEVEL`         | `--log-level`      | `info`                               | Log level: `debug`, `info`, `warn`, or `error`. Governs the server's own lines. |
 
-The wrapper reads `VRCVP_SERVER_URL` and defaults to `http://127.0.0.1:8080`.
+The wrapper reads `VRCVP_SERVER_URL` (default `http://127.0.0.1:8080`) and
+`VRCVP_LOG_LEVEL` (default `info`). The wrapper logs to its own stderr; when the
+level is `debug` it also appends to a `wrapper.log` file next to the wrapper
+executable, so a debugging user gets a persistent record even though VRChat gives
+the wrapper no console.
 
 ```sh
 VRCVP_CACHE_DIR=/var/cache/vrcvp \
@@ -187,8 +192,12 @@ curl -r 0-1023 'http://127.0.0.1:8080/video/<id>.mp4' -o /dev/null -D -
   a timeout. Downloads have their own timeout.
 - The background downloader has a basic SSRF guard that rejects upstream hosts
   resolving to loopback/private/link-local addresses.
-- All logging goes through `log/slog`. A failed download is logged and cleaned up;
-  it never crashes the server.
+- All logging goes through `log/slog` at a configurable level (`VRCVP_LOG_LEVEL` /
+  `--log-level`). The wrapper logs through `log/slog` too: always to its own
+  stderr, and additionally to a `wrapper.log` file beside the wrapper executable
+  when the level is `debug`. Opening the file is best-effort — if it cannot be
+  created the wrapper still logs to stderr and exits normally.
+- A failed download is logged and cleaned up; it never crashes the server.
 
 ## yt-dlp Wrapper
 

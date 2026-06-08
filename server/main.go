@@ -14,6 +14,8 @@ import (
 )
 
 func main() {
+	// Bootstrap logger at info until the configured level is known; config
+	// errors are reported through it before the real logger exists.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	cfg, err := LoadConfig(os.Args[1:])
@@ -21,6 +23,12 @@ func main() {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(2)
 	}
+
+	// LoadConfig has validated the level, so this cannot fail.
+	level, _ := parseLogLevel(cfg.LogLevel)
+	logger = newLogger(os.Stdout, level)
+	slog.SetDefault(logger)
+	logger.Debug("logging configured", "level", level.String())
 
 	if err := checkRequiredExecutables(exec.LookPath, cfg.YtdlpPath); err != nil {
 		logger.Error("failed startup dependency check", "error", err)

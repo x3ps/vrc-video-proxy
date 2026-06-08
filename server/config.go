@@ -21,6 +21,7 @@ const (
 	envSecret           = "VRCVP_SECRET"
 	envSegmentCacheTTL  = "VRCVP_SEGMENT_CACHE_TTL"
 	envSegmentCacheSize = "VRCVP_SEGMENT_CACHE_SIZE"
+	envLogLevel         = "VRCVP_LOG_LEVEL"
 )
 
 // defaultCacheMaxSize is the default on-disk cache budget (~10 GiB).
@@ -43,6 +44,7 @@ type Config struct {
 	Secret           string
 	SegmentCacheTTL  time.Duration
 	SegmentCacheSize int
+	LogLevel         string
 	GameCommand      []string
 }
 
@@ -56,6 +58,7 @@ func LoadConfig(args []string) (Config, error) {
 		FfmpegPath:       "ffmpeg",
 		SegmentCacheTTL:  defaultSegmentCacheTTL,
 		SegmentCacheSize: defaultSegmentCacheSize,
+		LogLevel:         "info",
 	}
 
 	if value := strings.TrimSpace(os.Getenv(envListen)); value != "" {
@@ -104,6 +107,9 @@ func LoadConfig(args []string) (Config, error) {
 		}
 		cfg.SegmentCacheSize = size
 	}
+	if value := strings.TrimSpace(os.Getenv(envLogLevel)); value != "" {
+		cfg.LogLevel = value
+	}
 
 	var cacheMaxSize string
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -117,6 +123,7 @@ func LoadConfig(args []string) (Config, error) {
 	flags.StringVar(&cfg.Secret, "secret", cfg.Secret, "secret for signing segment URLs (random per-process if empty)")
 	flags.DurationVar(&cfg.SegmentCacheTTL, "segment-cache-ttl", cfg.SegmentCacheTTL, "in-memory HLS/DASH segment cache TTL")
 	flags.IntVar(&cfg.SegmentCacheSize, "segment-cache-size", cfg.SegmentCacheSize, "in-memory HLS/DASH segment cache entry count")
+	flags.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn or error")
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "Usage: %s [options] [-- <game command> [args...]]\n", os.Args[0])
 		fmt.Fprintln(flags.Output())
@@ -124,7 +131,7 @@ func LoadConfig(args []string) (Config, error) {
 		flags.PrintDefaults()
 		fmt.Fprintln(flags.Output())
 		fmt.Fprintln(flags.Output(), "Environment:")
-		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile, envSecret, envSegmentCacheTTL, envSegmentCacheSize} {
+		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile, envSecret, envSegmentCacheTTL, envSegmentCacheSize, envLogLevel} {
 			fmt.Fprintf(flags.Output(), "  %s\n", name)
 		}
 	}
@@ -158,6 +165,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if cfg.SegmentCacheTTL < 0 {
 		return Config{}, fmt.Errorf("segment cache ttl must not be negative")
+	}
+	if _, err := parseLogLevel(cfg.LogLevel); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil

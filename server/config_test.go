@@ -150,6 +150,39 @@ func TestParseSizeRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadConfigLogLevel(t *testing.T) {
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("default LogLevel = %q, want info", cfg.LogLevel)
+	}
+
+	t.Setenv(envLogLevel, "warn")
+	cfg, err = LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.LogLevel != "warn" {
+		t.Fatalf("LogLevel from env = %q, want warn", cfg.LogLevel)
+	}
+
+	cfg, err = LoadConfig([]string{"--log-level", "debug"})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("LogLevel from flag = %q, want debug (flag overrides env)", cfg.LogLevel)
+	}
+}
+
+func TestLoadConfigRejectsInvalidLogLevel(t *testing.T) {
+	if _, err := LoadConfig([]string{"--log-level", "loud"}); err == nil {
+		t.Fatal("LoadConfig accepted invalid log level, want error")
+	}
+}
+
 func TestLoadConfigKeepsGameCommandAfterSeparator(t *testing.T) {
 	cfg, err := LoadConfig([]string{
 		"--listen", "127.0.0.1:9090",

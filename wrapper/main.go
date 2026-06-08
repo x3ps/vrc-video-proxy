@@ -31,25 +31,30 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer, client *http.Client) int {
-	req, err := parseWrapperRequest(args)
-	if err != nil {
-		fmt.Fprintf(stderr, "ERROR: [vrc-video-proxy] %v\n", err)
-		return 1
-	}
-
 	serverURL := strings.TrimSpace(os.Getenv(envServerURL))
 	if serverURL == "" {
 		serverURL = defaultServerURL
 	}
 
-	body, err := fetchVideo(context.Background(), client, serverURL, req)
+	logger, flush := newLogger(stderr, parseLogLevel(os.Getenv(envLogLevel)))
+	defer flush()
+
+	req, err := parseWrapperRequest(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "ERROR: [vrc-video-proxy] %v\n", err)
+		logger.Error("failed to parse arguments", "error", err, "args", args)
 		return 1
 	}
+	logger.Debug("parsed request", "url", req.URL, "avpro", req.AVPro, "source", req.Source)
+
+	body, err := fetchVideo(context.Background(), client, serverURL, req)
+	if err != nil {
+		logger.Error("failed to fetch video", "url", req.URL, "server", serverURL, "error", err)
+		return 1
+	}
+	logger.Info("fetched video", "url", req.URL, "bytes", len(body))
 
 	if _, err := stdout.Write(body); err != nil {
-		fmt.Fprintf(stderr, "ERROR: [vrc-video-proxy] failed to write response: %v\n", err)
+		logger.Error("failed to write response", "error", err)
 		return 1
 	}
 	if len(body) == 0 || body[len(body)-1] != '\n' {

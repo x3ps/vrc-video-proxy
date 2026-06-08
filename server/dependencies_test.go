@@ -8,7 +8,7 @@ import (
 func TestCheckRequiredExecutablesPassesWhenYtdlpExists(t *testing.T) {
 	err := checkRequiredExecutables(func(name string) (string, error) {
 		return "/usr/bin/" + name, nil
-	}, "yt-dlp")
+	}, "yt-dlp", "ffmpeg", "ffprobe")
 
 	if err != nil {
 		t.Fatalf("checkRequiredExecutables returned error: %v", err)
@@ -18,7 +18,7 @@ func TestCheckRequiredExecutablesPassesWhenYtdlpExists(t *testing.T) {
 func TestCheckRequiredExecutablesReportsMissingYtdlp(t *testing.T) {
 	err := checkRequiredExecutables(func(name string) (string, error) {
 		return "", errors.New("not found")
-	}, "yt-dlp")
+	}, "yt-dlp", "ffmpeg", "ffprobe")
 
 	if err == nil {
 		t.Fatal("checkRequiredExecutables returned nil, want error")
@@ -30,31 +30,57 @@ func TestCheckRequiredExecutablesReportsMissingYtdlp(t *testing.T) {
 }
 
 func TestCheckRequiredExecutablesUsesConfiguredPath(t *testing.T) {
-	var looked string
+	var looked []string
 	err := checkRequiredExecutables(func(name string) (string, error) {
-		looked = name
-		return "/opt/yt-dlp", nil
-	}, "/opt/yt-dlp")
+		looked = append(looked, name)
+		return name, nil
+	}, "/opt/yt-dlp", "/opt/ffmpeg", "/opt/ffprobe")
 
 	if err != nil {
 		t.Fatalf("checkRequiredExecutables returned error: %v", err)
 	}
-	if looked != "/opt/yt-dlp" {
-		t.Fatalf("looked up %q, want /opt/yt-dlp", looked)
+
+	want := []string{"/opt/yt-dlp", "/opt/ffmpeg", "/opt/ffprobe"}
+	if len(looked) != len(want) {
+		t.Fatalf("looked up %v, want %v", looked, want)
+	}
+	for i := range want {
+		if looked[i] != want[i] {
+			t.Fatalf("looked up %v, want %v", looked, want)
+		}
 	}
 }
 
-func TestCheckRequiredExecutablesDoesNotRequireFfmpeg(t *testing.T) {
-	// ffmpeg is not in the required set, so a lookup that only fails for ffmpeg
-	// must still succeed.
+func TestCheckRequiredExecutablesReportsMissingFfmpeg(t *testing.T) {
 	err := checkRequiredExecutables(func(name string) (string, error) {
 		if name == "ffmpeg" {
 			return "", errors.New("not found")
 		}
 		return "/usr/bin/" + name, nil
-	}, "yt-dlp")
+	}, "yt-dlp", "ffmpeg", "ffprobe")
 
-	if err != nil {
-		t.Fatalf("checkRequiredExecutables returned error: %v", err)
+	if err == nil {
+		t.Fatal("checkRequiredExecutables returned nil, want error")
+	}
+
+	if got, want := err.Error(), "missing required executable: ffmpeg"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestCheckRequiredExecutablesReportsMissingFfprobe(t *testing.T) {
+	err := checkRequiredExecutables(func(name string) (string, error) {
+		if name == "ffprobe" {
+			return "", errors.New("not found")
+		}
+		return "/usr/bin/" + name, nil
+	}, "yt-dlp", "ffmpeg", "ffprobe")
+
+	if err == nil {
+		t.Fatal("checkRequiredExecutables returned nil, want error")
+	}
+
+	if got, want := err.Error(), "missing required executable: ffprobe"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }

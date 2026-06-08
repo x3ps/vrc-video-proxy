@@ -59,9 +59,9 @@ func LoadConfig(args []string) (Config, error) {
 		ShutdownTimeout:  5 * time.Second,
 		CacheDir:         defaultCacheDir(),
 		CacheMaxSize:     defaultCacheMaxSize,
-		YtdlpPath:        "yt-dlp",
-		FfmpegPath:       "ffmpeg",
-		FfprobePath:      "ffprobe",
+		YtdlpPath:        defaultYtdlpPath,
+		FfmpegPath:       defaultFfmpegPath,
+		FfprobePath:      defaultFfprobePath,
 		SegmentCacheTTL:  defaultSegmentCacheTTL,
 		SegmentCacheSize: defaultSegmentCacheSize,
 		LogLevel:         "info",
@@ -130,7 +130,7 @@ func LoadConfig(args []string) (Config, error) {
 	flags.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "directory for cached videos")
 	flags.StringVar(&cacheMaxSize, "cache-max-size", "", "cache size budget (e.g. 10GB, 500MB, or bytes)")
 	flags.StringVar(&cfg.YtdlpPath, "ytdlp-path", cfg.YtdlpPath, "path to the yt-dlp executable")
-	flags.StringVar(&cfg.FfmpegPath, "ffmpeg-path", cfg.FfmpegPath, "path to the ffmpeg executable (reserved)")
+	flags.StringVar(&cfg.FfmpegPath, "ffmpeg-path", cfg.FfmpegPath, "path to the ffmpeg executable")
 	flags.StringVar(&cfg.FfprobePath, "ffprobe-path", cfg.FfprobePath, "path to the ffprobe executable")
 	flags.StringVar(&cfg.CookiesFile, "cookies-file", cfg.CookiesFile, "optional yt-dlp cookies file")
 	flags.StringVar(&cfg.Secret, "secret", cfg.Secret, "secret for signing segment URLs (random per-process if empty)")

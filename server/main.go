@@ -32,19 +32,12 @@ func main() {
 
 	configureProxy(logger, cfg)
 
-	if err := checkRequiredExecutables(exec.LookPath, cfg.YtdlpPath); err != nil {
+	if err := checkRequiredExecutables(exec.LookPath, cfg.YtdlpPath, cfg.FfmpegPath, cfg.FfprobePath); err != nil {
 		logger.Error("failed startup dependency check", "error", err)
 		os.Exit(1)
 	}
-	if _, err := exec.LookPath(cfg.FfmpegPath); err != nil {
-		logger.Warn("ffmpeg not found; HLS/DASH remux and transcoding will be unavailable, continuing", "ffmpeg", cfg.FfmpegPath)
-	} else {
-		// Probe and cache the preferred H.264 encoder once at startup.
-		newFfmpegRunner(cfg.FfmpegPath, logger).h264Encoder()
-	}
-	if _, err := exec.LookPath(cfg.FfprobePath); err != nil {
-		logger.Warn("ffprobe not found; media probing will be unavailable, continuing", "ffprobe", cfg.FfprobePath)
-	}
+	// Probe and cache the preferred H.264 encoder once at startup.
+	newFfmpegRunner(cfg.FfmpegPath, logger).h264Encoder()
 
 	srv, err := NewServer(cfg, logger)
 	if err != nil {

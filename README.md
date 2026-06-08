@@ -96,8 +96,8 @@ The kind of source decides the serving path:
 - **Live DASH** support covers `SegmentTemplate` + `SegmentTimeline` manifests
   (the common live shape); other MPD shapes return `501`. Live segments are not
   cached across restarts (the in-memory segment cache is process-local).
-- **ffmpeg is required** for HLS/DASH remux and transcoding. It remains optional if
-  you only use progressive sources; a warning is logged if it is missing.
+- **ffmpeg and ffprobe are required** at startup. ffmpeg handles HLS/DASH remux
+  and transcoding; ffprobe is used for media probing.
 
 ## Planned features
 
@@ -128,7 +128,8 @@ Priority: command-line flags > environment variables > defaults.
 | `VRCVP_CACHE_DIR`         | `--cache-dir`      | OS user cache dir `/vrc-video-proxy` | Directory for cached videos. |
 | `VRCVP_CACHE_MAX_SIZE`    | `--cache-max-size` | `10GB`                               | Cache budget (`10GB`, `500MB`, `1.5G`, or raw bytes). LRU eviction by mtime. |
 | `VRCVP_YTDLP_PATH`        | `--ytdlp-path`     | `yt-dlp`                             | Path to the yt-dlp executable (required). |
-| `VRCVP_FFMPEG_PATH`       | `--ffmpeg-path`    | `ffmpeg`                             | Path to ffmpeg (required for HLS/DASH remux and transcoding). |
+| `VRCVP_FFMPEG_PATH`       | `--ffmpeg-path`    | `ffmpeg`                             | Path to ffmpeg (required). |
+| `VRCVP_FFPROBE_PATH`      | `--ffprobe-path`   | `ffprobe`                            | Path to ffprobe (required). |
 | `VRCVP_COOKIES_FILE`      | `--cookies-file`   | (none)                               | Optional yt-dlp cookies file. |
 | `VRCVP_SECRET`            | `--secret`         | (random per process)                 | Secret for signing manifest/segment URLs. Set a fixed value if exposing the proxy publicly so tokens survive restarts. |
 | `VRCVP_SEGMENT_CACHE_TTL` | `--segment-cache-ttl` | `5m`                              | In-memory live HLS/DASH segment cache TTL. |
@@ -154,11 +155,9 @@ VRCVP_CACHE_MAX_SIZE=20GB \
 ./vrc-video-proxy-server --listen 127.0.0.1:9090
 ```
 
-The server is required to find `yt-dlp` at startup. `ffmpeg` is optional but
-needed for HLS/DASH: a warning is logged if it is missing and the server still
-runs, but HLS/DASH remux and transcoding will be unavailable. When `ffmpeg` is
-present the preferred H.264 encoder (hardware if available, else `libx264`) is
-probed once at startup.
+The server is required to find `yt-dlp`, `ffmpeg`, and `ffprobe` at startup. The
+preferred H.264 encoder (hardware if available, else `libx264`) is probed once at
+startup.
 
 ## Steam Launch Options
 

@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const defaultYtdlpPath = "yt-dlp"
+
 const ytdlpTimeout = 30 * time.Second
 
 // progressiveFormat prefers a single file that already contains both audio and
@@ -31,7 +33,7 @@ func (ytdlpExtractor) Extract(ctx context.Context, cfg Config, rawURL string, lo
 
 	ytdlpPath := cfg.YtdlpPath
 	if ytdlpPath == "" {
-		ytdlpPath = "yt-dlp"
+		ytdlpPath = defaultYtdlpPath
 	}
 
 	// progressiveFormat prefers a combined file but ends with "/best", so when a

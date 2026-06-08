@@ -159,11 +159,10 @@ func (m *JobManager) run(job *Job) {
 	defer cancel()
 	job.fillCtx = ctx
 
-	m.logger.Info("download job started", "id", job.id, "mode", jobMode(job))
-
 	// Remux jobs have no probeable size: ffmpeg produces a fragmented MP4 stream
 	// that is tailed sequentially, then finalized like any other download.
 	if job.remux {
+		m.logger.Info("download job started", "id", job.id, "mode", jobMode(job))
 		close(job.ready)
 		err := m.runRemux(ctx, job)
 		if err == nil {
@@ -188,6 +187,9 @@ func (m *JobManager) run(job *Job) {
 	}
 	job.probeErr = err
 	close(job.ready)
+
+	// Log after the probe so the reported mode (sparse vs sequential) is accurate.
+	m.logger.Info("download job started", "id", job.id, "mode", jobMode(job))
 
 	if err == nil {
 		if job.rangeable {

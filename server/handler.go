@@ -171,6 +171,7 @@ func (s *Server) getVideoHandler(w http.ResponseWriter, r *http.Request) {
 			"original_url": videoReq.URL,
 			"_cache":       "hit",
 		}
+		s.logPlaybackResponse(videoReq.Source, metadata)
 		writeVideoResponse(w, videoReq.Source, metadata)
 		return
 	}
@@ -178,7 +179,7 @@ func (s *Server) getVideoHandler(w http.ResponseWriter, r *http.Request) {
 	// Cache miss: extract metadata + a stream URL, then route by the kind of
 	// stream. Progressive files download to the disk cache; HLS/DASH take their
 	// own manifest-aware paths.
-	ext, err := s.extract.Extract(r.Context(), s.cfg, videoReq.URL)
+	ext, err := s.extract.Extract(r.Context(), s.cfg, videoReq.URL, s.logger)
 	if err != nil {
 		s.logger.Error("extraction failed", "url", videoReq.URL, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -212,6 +213,7 @@ func (s *Server) serveLiveManifestMiss(w http.ResponseWriter, r *http.Request, v
 	replaceStreamURLs(metadata, manifestURL)
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "live"
+	s.logPlaybackResponse(videoReq.Source, metadata)
 	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
@@ -227,6 +229,7 @@ func (s *Server) serveRemuxMiss(w http.ResponseWriter, r *http.Request, id strin
 	metadata["ext"] = "mp4"
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "miss"
+	s.logPlaybackResponse(videoReq.Source, metadata)
 	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
@@ -239,6 +242,7 @@ func (s *Server) serveProgressiveMiss(w http.ResponseWriter, r *http.Request, id
 	replaceStreamURLs(metadata, s.playableURL(r, "/live/", id))
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "miss"
+	s.logPlaybackResponse(videoReq.Source, metadata)
 	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
@@ -394,6 +398,18 @@ func (s *Server) playableURL(r *http.Request, prefix, id string) string {
 func (s *Server) proxyBase(r *http.Request) string {
 	u := url.URL{Scheme: requestScheme(r), Host: r.Host}
 	return u.String()
+}
+
+func (s *Server) logPlaybackResponse(source string, metadata ytdlpMetadata) {
+	playURL, _ := stringField(metadata, "url")
+	cacheState, _ := stringField(metadata, "_cache")
+	originalURL, _ := stringField(metadata, "original_url")
+	s.logger.Info("returning playback url",
+		"source", source,
+		"cache", cacheState,
+		"url", redactURLForLog(playURL),
+		"original_url", redactURLForLog(originalURL),
+	)
 }
 
 // writeVideoResponse returns the resolved playback location to the wrapper in the

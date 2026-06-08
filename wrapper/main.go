@@ -51,7 +51,11 @@ func run(args []string, stdout, stderr io.Writer, client *http.Client) int {
 		logger.Error("failed to fetch video", "url", req.URL, "server", serverURL, "error", err)
 		return 1
 	}
-	logger.Info("fetched video", "url", req.URL, "bytes", len(body))
+	logger.Info("fetched video",
+		"url", req.URL,
+		"bytes", len(body),
+		"playback_url", redactURLForLog(strings.TrimSpace(string(body))),
+	)
 
 	if _, err := stdout.Write(body); err != nil {
 		logger.Error("failed to write response", "error", err)
@@ -148,4 +152,26 @@ func getVideoEndpoint(serverURL string, req wrapperRequest) (string, error) {
 func isAbsoluteHTTPURL(rawURL string) bool {
 	parsedURL, err := url.Parse(rawURL)
 	return err == nil && (parsedURL.Scheme == "http" || parsedURL.Scheme == "https") && parsedURL.Host != ""
+}
+
+// redactURLForLog returns rawURL with its query string and fragment masked, so a
+// log line records which endpoint was used without leaking signed tokens or
+// credentials carried in the query. Unparseable input becomes "<invalid-url>".
+// Intentionally duplicated in the server and wrapper binaries (they share no
+// package); keep the two copies identical.
+func redactURLForLog(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return "<invalid-url>"
+	}
+	if parsedURL.RawQuery != "" {
+		parsedURL.RawQuery = "<redacted>"
+	}
+	if parsedURL.Fragment != "" {
+		parsedURL.Fragment = "<redacted>"
+	}
+	return parsedURL.String()
 }

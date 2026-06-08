@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,15 +51,15 @@ type Extraction struct {
 // implementation today; the interface keeps room for native per-host extractors
 // behind the same shape (each can report a different Endpoint).
 type Extractor interface {
-	Extract(ctx context.Context, cfg Config, rawURL string) (Extraction, error)
+	Extract(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error)
 }
 
 // extractorFunc adapts a plain function to the Extractor interface, mirroring
 // http.HandlerFunc. Tests use it to inject fakes.
-type extractorFunc func(ctx context.Context, cfg Config, rawURL string) (Extraction, error)
+type extractorFunc func(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error)
 
-func (f extractorFunc) Extract(ctx context.Context, cfg Config, rawURL string) (Extraction, error) {
-	return f(ctx, cfg, rawURL)
+func (f extractorFunc) Extract(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error) {
+	return f(ctx, cfg, rawURL, logger)
 }
 
 // classifyEndpoint determines the Endpoint for a chosen stream from the yt-dlp

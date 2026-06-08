@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,7 +40,7 @@ func TestGetVideoHandlerCacheHitReturnsVideoURL(t *testing.T) {
 		t.Fatalf("write cache file: %v", err)
 	}
 
-	srv.extract = extractorFunc(func(context.Context, Config, string) (Extraction, error) {
+	srv.extract = extractorFunc(func(context.Context, Config, string, *slog.Logger) (Extraction, error) {
 		t.Fatal("extract should not be called on cache hit")
 		return Extraction{}, nil
 	})
@@ -107,7 +108,7 @@ func TestGetVideoHandlerCacheMissStartsJobAndReturnsLiveURL(t *testing.T) {
 	const sourceURL = "https://example.com/watch?v=2"
 	id := cacheID(sourceURL)
 
-	srv.extract = extractorFunc(func(_ context.Context, _ Config, rawURL string) (Extraction, error) {
+	srv.extract = extractorFunc(func(_ context.Context, _ Config, rawURL string, _ *slog.Logger) (Extraction, error) {
 		if rawURL != sourceURL {
 			t.Fatalf("extract rawURL = %q", rawURL)
 		}

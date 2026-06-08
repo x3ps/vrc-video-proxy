@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os/exec"
 	"time"
@@ -22,9 +23,11 @@ type ytdlpMetadata map[string]any
 // ytdlpExtractor is the default Extractor: it shells out to the yt-dlp binary.
 type ytdlpExtractor struct{}
 
-func (ytdlpExtractor) Extract(ctx context.Context, cfg Config, rawURL string) (Extraction, error) {
+func (ytdlpExtractor) Extract(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error) {
 	ctx, cancel := context.WithTimeout(ctx, ytdlpTimeout)
 	defer cancel()
+
+	logger.Debug("running yt-dlp", "url", redactURLForLog(rawURL))
 
 	ytdlpPath := cfg.YtdlpPath
 	if ytdlpPath == "" {

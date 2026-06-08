@@ -92,7 +92,7 @@ func NewJobManager(cache *Cache, logger *slog.Logger) *JobManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ff := newFfmpegRunner(defaultFfmpegPath, logger)
+	ff := newFfmpegRunner(defaultFfmpegPath, logger, transcodeOptions{})
 	return &JobManager{
 		cache:         cache,
 		logger:        logger,

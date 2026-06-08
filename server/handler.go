@@ -37,7 +37,21 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 	}
 	segCache := NewMemCache(cfg.SegmentCacheSize, cfg.SegmentCacheTTL)
 	jobs := NewJobManager(cache, logger)
-	jobs.openRemux = newFfmpegRunner(cfg.FfmpegPath, logger).openRemux
+	// One configured ffmpeg runner feeds both the remux (stream-copy) and
+	// transcode (re-encode) paths, so cfg.FfmpegPath and the transcode options
+	// reach both — previously openTranscode silently used the default binary.
+	ff := newFfmpegRunner(cfg.FfmpegPath, logger, transcodeOptions{
+		backend:      cfg.FfmpegBackend,
+		hwDevice:     cfg.FfmpegHWDevice,
+		preset:       cfg.TranscodePreset,
+		crf:          cfg.TranscodeCRF,
+		videoBitrate: cfg.TranscodeVideoBitrate,
+		maxrate:      cfg.TranscodeMaxrate,
+		bufsize:      cfg.TranscodeBufsize,
+		audioBitrate: cfg.TranscodeAudioBitrate,
+	})
+	jobs.openRemux = ff.openRemux
+	jobs.openTranscode = ff.openTranscode
 	return &Server{
 		cfg:      cfg,
 		cache:    cache,

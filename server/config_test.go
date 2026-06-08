@@ -234,6 +234,160 @@ func TestParseProxyURL(t *testing.T) {
 	}
 }
 
+func TestLoadConfigHWAccelDefaultsToSoftware(t *testing.T) {
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.FfmpegBackend != hwSoftware {
+		t.Fatalf("default FfmpegBackend = %q, want software", cfg.FfmpegBackend)
+	}
+}
+
+func TestLoadConfigHWAccelEnvAndFlag(t *testing.T) {
+	t.Setenv(envFfmpegHWAccel, "nvenc")
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.FfmpegBackend != hwNVENC {
+		t.Fatalf("FfmpegBackend from env = %q, want nvenc", cfg.FfmpegBackend)
+	}
+
+	// Flag overrides env; "libx264" and mixed case both normalise to software.
+	cfg, err = LoadConfig([]string{"--ffmpeg-hwaccel", "LibX264"})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.FfmpegBackend != hwSoftware {
+		t.Fatalf("FfmpegBackend from flag = %q, want software", cfg.FfmpegBackend)
+	}
+}
+
+func TestLoadConfigRejectsUnknownHWAccel(t *testing.T) {
+	if _, err := LoadConfig([]string{"--ffmpeg-hwaccel", "bogus"}); err == nil {
+		t.Fatal("LoadConfig accepted unknown hwaccel, want error")
+	}
+}
+
+func TestLoadConfigVAAPIRequiresDevice(t *testing.T) {
+	if _, err := LoadConfig([]string{"--ffmpeg-hwaccel", "vaapi"}); err == nil {
+		t.Fatal("LoadConfig accepted vaapi without a device, want error")
+	}
+	cfg, err := LoadConfig([]string{"--ffmpeg-hwaccel", "vaapi", "--ffmpeg-hw-device", "/dev/dri/renderD128"})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.FfmpegBackend != hwVAAPI || cfg.FfmpegHWDevice != "/dev/dri/renderD128" {
+		t.Fatalf("vaapi config = %q/%q, want vaapi /dev/dri/renderD128", cfg.FfmpegBackend, cfg.FfmpegHWDevice)
+	}
+}
+
+func TestLoadConfigYtdlpFormatEnvAndFlag(t *testing.T) {
+	t.Setenv(envYtdlpFormat, "best[height<=720]")
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.YtdlpFormat != "best[height<=720]" {
+		t.Fatalf("YtdlpFormat from env = %q, want best[height<=720]", cfg.YtdlpFormat)
+	}
+
+	cfg, err = LoadConfig([]string{"--ytdlp-format", "best[height<=480]"})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.YtdlpFormat != "best[height<=480]" {
+		t.Fatalf("YtdlpFormat from flag = %q, want best[height<=480]", cfg.YtdlpFormat)
+	}
+}
+
+func TestLoadConfigYtdlpExtraArgsJSON(t *testing.T) {
+	t.Setenv(envYtdlpExtraArgsJSON, `["--add-headers","User-Agent: Mozilla/5.0","--extractor-args","youtube:player_client=android"]`)
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	want := []string{"--add-headers", "User-Agent: Mozilla/5.0", "--extractor-args", "youtube:player_client=android"}
+	if !reflect.DeepEqual(cfg.YtdlpExtraArgs, want) {
+		t.Fatalf("YtdlpExtraArgs = %#v, want %#v (spaces preserved as one element)", cfg.YtdlpExtraArgs, want)
+	}
+
+	// Flag overrides env, including a header value containing spaces.
+	cfg, err = LoadConfig([]string{"--ytdlp-extra-args-json", `["--add-header","Authorization: Bearer token"]`})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	want = []string{"--add-header", "Authorization: Bearer token"}
+	if !reflect.DeepEqual(cfg.YtdlpExtraArgs, want) {
+		t.Fatalf("YtdlpExtraArgs from flag = %#v, want %#v", cfg.YtdlpExtraArgs, want)
+	}
+}
+
+func TestLoadConfigRejectsBadYtdlpExtraArgs(t *testing.T) {
+	cases := []string{
+		`not json`,
+		`{"k":"v"}`,       // object, not an array of strings
+		`["--ok", ""]`,    // empty element
+		`["--ok", "   "]`, // blank element
+	}
+	for _, in := range cases {
+		if _, err := LoadConfig([]string{"--ytdlp-extra-args-json", in}); err == nil {
+			t.Fatalf("LoadConfig accepted bad extra args %q, want error", in)
+		}
+	}
+}
+
+func TestLoadConfigTranscodeOptionsEnvAndFlag(t *testing.T) {
+	t.Setenv(envTranscodePreset, "slow")
+	t.Setenv(envTranscodeCRF, "20")
+	t.Setenv(envTranscodeVideoBitrate, "4M")
+	t.Setenv(envTranscodeMaxrate, "5M")
+	t.Setenv(envTranscodeBufsize, "10M")
+	t.Setenv(envTranscodeAudioBitrate, "160k")
+
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	assertTranscodeConfig(t, cfg, "slow", "20", "4M", "5M", "10M", "160k")
+
+	cfg, err = LoadConfig([]string{
+		"--transcode-preset", "medium",
+		"--transcode-crf", "21",
+		"--transcode-video-bitrate", "6M",
+		"--transcode-maxrate", "7M",
+		"--transcode-bufsize", "14M",
+		"--transcode-audio-bitrate", "128k",
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	assertTranscodeConfig(t, cfg, "medium", "21", "6M", "7M", "14M", "128k")
+}
+
+func assertTranscodeConfig(t *testing.T, cfg Config, preset, crf, videoBitrate, maxrate, bufsize, audioBitrate string) {
+	t.Helper()
+	if cfg.TranscodePreset != preset {
+		t.Fatalf("TranscodePreset = %q, want %q", cfg.TranscodePreset, preset)
+	}
+	if cfg.TranscodeCRF != crf {
+		t.Fatalf("TranscodeCRF = %q, want %q", cfg.TranscodeCRF, crf)
+	}
+	if cfg.TranscodeVideoBitrate != videoBitrate {
+		t.Fatalf("TranscodeVideoBitrate = %q, want %q", cfg.TranscodeVideoBitrate, videoBitrate)
+	}
+	if cfg.TranscodeMaxrate != maxrate {
+		t.Fatalf("TranscodeMaxrate = %q, want %q", cfg.TranscodeMaxrate, maxrate)
+	}
+	if cfg.TranscodeBufsize != bufsize {
+		t.Fatalf("TranscodeBufsize = %q, want %q", cfg.TranscodeBufsize, bufsize)
+	}
+	if cfg.TranscodeAudioBitrate != audioBitrate {
+		t.Fatalf("TranscodeAudioBitrate = %q, want %q", cfg.TranscodeAudioBitrate, audioBitrate)
+	}
+}
+
 func TestLoadConfigKeepsGameCommandAfterSeparator(t *testing.T) {
 	cfg, err := LoadConfig([]string{
 		"--listen", "127.0.0.1:9090",

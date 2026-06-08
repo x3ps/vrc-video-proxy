@@ -36,8 +36,14 @@ func main() {
 		logger.Error("failed startup dependency check", "error", err)
 		os.Exit(1)
 	}
-	// Probe and cache the preferred H.264 encoder once at startup.
-	newFfmpegRunner(cfg.FfmpegPath, logger).h264Encoder()
+	// Hardware acceleration is explicit (default software libx264); fail fast at
+	// startup if the configured hardware encoder is missing from this ffmpeg build.
+	ff := newFfmpegRunner(cfg.FfmpegPath, logger, transcodeOptions{backend: cfg.FfmpegBackend, hwDevice: cfg.FfmpegHWDevice})
+	if err := ff.validateBackend(); err != nil {
+		logger.Error("ffmpeg hardware encoder unavailable", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("transcode encoder selected", "backend", cfg.FfmpegBackend)
 
 	srv, err := NewServer(cfg, logger)
 	if err != nil {

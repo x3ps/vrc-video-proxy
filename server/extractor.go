@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -51,15 +50,15 @@ type Extraction struct {
 // implementation today; the interface keeps room for native per-host extractors
 // behind the same shape (each can report a different Endpoint).
 type Extractor interface {
-	Extract(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error)
+	Extract(ctx context.Context, rawURL string) (Extraction, error)
 }
 
 // extractorFunc adapts a plain function to the Extractor interface, mirroring
 // http.HandlerFunc. Tests use it to inject fakes.
-type extractorFunc func(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error)
+type extractorFunc func(ctx context.Context, rawURL string) (Extraction, error)
 
-func (f extractorFunc) Extract(ctx context.Context, cfg Config, rawURL string, logger *slog.Logger) (Extraction, error) {
-	return f(ctx, cfg, rawURL, logger)
+func (f extractorFunc) Extract(ctx context.Context, rawURL string) (Extraction, error) {
+	return f(ctx, rawURL)
 }
 
 // classifyEndpoint determines the Endpoint for a chosen stream from the yt-dlp
@@ -133,6 +132,15 @@ func extractHeaders(metadata ytdlpMetadata) http.Header {
 func needsTranscode(metadata ytdlpMetadata) bool {
 	vcodec, _ := stringField(metadata, "vcodec")
 	acodec, _ := stringField(metadata, "acodec")
+	return transcodeFromCodecs(vcodec, acodec)
+}
+
+// transcodeFromCodecs decides whether a stream with the given video and audio
+// codec names must be re-encoded for MP4/AVPro playback. Codec names may come
+// from yt-dlp metadata (e.g. "avc1", "mp4a") or from ffprobe (e.g. "h264",
+// "aac"); both naming conventions are recognised. Empty (unknown) codecs are
+// treated as compatible to avoid needless re-encoding.
+func transcodeFromCodecs(vcodec, acodec string) bool {
 	return !mp4FriendlyVideo(vcodec) || !mp4FriendlyAudio(acodec)
 }
 

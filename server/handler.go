@@ -57,7 +57,7 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 		cache:    cache,
 		jobs:     jobs,
 		logger:   logger,
-		extract:  ytdlpExtractor{},
+		extract:  newYtdlpRunner(cfg, logger),
 		signer:   signer,
 		segCache: segCache,
 		hls:      newHLSProxy(signer, segCache, logger),
@@ -193,7 +193,7 @@ func (s *Server) getVideoHandler(w http.ResponseWriter, r *http.Request) {
 	// Cache miss: extract metadata + a stream URL, then route by the kind of
 	// stream. Progressive files download to the disk cache; HLS/DASH take their
 	// own manifest-aware paths.
-	ext, err := s.extract.Extract(r.Context(), s.cfg, videoReq.URL, s.logger)
+	ext, err := s.extract.Extract(r.Context(), videoReq.URL)
 	if err != nil {
 		s.logger.Error("extraction failed", "url", videoReq.URL, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

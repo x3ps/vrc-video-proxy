@@ -79,7 +79,9 @@ func (f *ffprobeRunner) probe(ctx context.Context, srcURL string, headers map[st
 	f.logger.Debug("ffprobe starting", "args", strings.Join(args, " "))
 	stdout, err := cmd.Output()
 	if err != nil {
-		f.logger.Error("ffprobe exited with error", "error", err, "stderr", stderr.String())
+		// Best-effort probe: the caller (decideTranscode) treats any failure as an
+		// expected fallback and logs it at Debug, so we must not emit an Error line
+		// here. The stderr tail is preserved in the returned error for diagnostics.
 		return nil, fmt.Errorf("ffprobe: %w: %s", err, stderr.String())
 	}
 

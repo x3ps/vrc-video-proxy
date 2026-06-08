@@ -134,6 +134,13 @@ Priority: command-line flags > environment variables > defaults.
 | `VRCVP_SEGMENT_CACHE_TTL` | `--segment-cache-ttl` | `5m`                              | In-memory live HLS/DASH segment cache TTL. |
 | `VRCVP_SEGMENT_CACHE_SIZE`| `--segment-cache-size`| `512`                             | In-memory live HLS/DASH segment cache entry count. |
 | `VRCVP_LOG_LEVEL`         | `--log-level`      | `info`                               | Log level: `debug`, `info`, `warn`, or `error`. Governs the server's own lines. |
+| `VRCVP_PROXY`             | `--proxy`          | (none)                               | Proxy for **all** upstream traffic and tools, as `protocol://host:port` (`http`, `https`, `socks5`, `socks5h`; userinfo is sent as proxy auth). Routes the Go HTTP client, `yt-dlp`, and `ffmpeg`. When unset, an ambient `HTTP_PROXY`/`HTTPS_PROXY` is still honored. |
+
+`VRCVP_PROXY` makes every outbound request egress through the given proxy: the
+server's own HTTP fetches (probe, range downloads, HLS/DASH proxy), `yt-dlp` (via
+`--proxy`), and `ffmpeg` (via the `http_proxy`/`https_proxy` env it inherits, or
+`socks_proxy` for SOCKS). Note that `ffmpeg`'s SOCKS support requires a reasonably
+recent build.
 
 The wrapper reads `VRCVP_SERVER_URL` (default `http://127.0.0.1:8080`) and
 `VRCVP_LOG_LEVEL` (default `info`). The wrapper logs to its own stderr; when the

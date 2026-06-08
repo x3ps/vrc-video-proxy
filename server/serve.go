@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -78,7 +79,12 @@ func serveLive(w http.ResponseWriter, r *http.Request, job *Job, logger *slog.Lo
 		return
 	}
 
-	n, err := io.Copy(w, reader)
+	var served int64
+	progressStop := make(chan struct{})
+	defer close(progressStop)
+	go watchSlowClientStart(logger, job, contentLength, &served, progressStop)
+
+	n, err := io.Copy(&countingWriter{w: w, n: &served}, reader)
 	if err != nil && !errors.Is(err, r.Context().Err()) {
 		// Client disconnects and context cancellation are expected; nothing to do
 		// but stop. The background job keeps running and still fills the cache.
@@ -86,6 +92,48 @@ func serveLive(w http.ResponseWriter, r *http.Request, job *Job, logger *slog.Lo
 		return
 	}
 	logger.Debug("live stream served", "bytes", n)
+}
+
+type countingWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	atomic.AddInt64(w.n, int64(n))
+	return n, err
+}
+
+// watchSlowClientStart warns once if the client has received no bytes within
+// slowFirstByteThreshold, surfacing a player that connected but is not consuming.
+// The background job keeps filling the cache regardless, so this is a Warn, not an
+// error. It returns as soon as the stream makes progress is no longer relevant —
+// i.e. when stop is closed at the end of serveLive.
+func watchSlowClientStart(logger *slog.Logger, job *Job, contentLength int64, served *int64, stop <-chan struct{}) {
+	timer := time.NewTimer(slowFirstByteThreshold)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		if atomic.LoadInt64(served) != 0 {
+			return
+		}
+		job.mu.Lock()
+		jobWritten := job.written
+		jobDone := job.done
+		jobErr := job.err
+		job.mu.Unlock()
+		logger.Warn("sequential client first byte slow",
+			"client_bytes", int64(0),
+			"job_written", jobWritten,
+			"content_length", contentLength,
+			"job_done", jobDone,
+			"job_error", jobErr,
+			"wait_ms", slowFirstByteThreshold.Milliseconds(),
+		)
+	case <-stop:
+	}
 }
 
 // parseSingleRange parses a single HTTP byte range against a known size.
@@ -211,14 +259,32 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 		blocked := sf.availableEnd(pos) <= pos
 		if err := sf.waitByte(ctx, pos); err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				logger.Debug("client gone while awaiting bytes", "pos", pos, "error", err)
+				logger.Debug("client gone while awaiting sparse bytes",
+					"start", start,
+					"end", end,
+					"pos", pos,
+					"bytes", pos-start,
+					"error", err,
+				)
 			} else {
-				logger.Warn("failed waiting for sparse bytes", "pos", pos, "error", err)
+				logger.Warn("failed waiting for sparse bytes",
+					"start", start,
+					"end", end,
+					"pos", pos,
+					"bytes", pos-start,
+					"error", err,
+				)
 			}
 			return
 		}
-		if blocked {
-			logger.Debug("seek fill latency", "pos", pos, "wait_ms", time.Since(waitStart).Milliseconds())
+		if wait := time.Since(waitStart); blocked && wait >= slowClientWaitThreshold {
+			logger.Warn("client sparse wait slow",
+				"start", start,
+				"end", end,
+				"pos", pos,
+				"bytes", pos-start,
+				"wait_ms", wait.Milliseconds(),
+			)
 		}
 		limit := min(sf.availableEnd(pos), end+1)
 		for pos < limit {
@@ -226,7 +292,13 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 			rn, rerr := rf.ReadAt(buf[:n], pos)
 			if rn > 0 {
 				if _, werr := w.Write(buf[:rn]); werr != nil {
-					logger.Debug("client write failed (pause/disconnect)", "pos", pos, "error", werr)
+					logger.Debug("client write failed (pause/disconnect)",
+						"start", start,
+						"end", end,
+						"pos", pos,
+						"bytes", pos-start,
+						"error", werr,
+					)
 					return
 				}
 				pos += int64(rn)

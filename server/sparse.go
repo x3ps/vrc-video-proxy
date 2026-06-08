@@ -127,6 +127,14 @@ func (s *intervalSet) runEnd(off int64) int64 {
 	return off
 }
 
+func (s *intervalSet) totalBytes() int64 {
+	var total int64
+	for _, it := range s.items {
+		total += it.end - it.start
+	}
+	return total
+}
+
 // SparseFile is a fixed-size on-disk file filled out of order, with an in-memory
 // map of which byte ranges are present and which are being fetched.
 type SparseFile struct {
@@ -244,6 +252,26 @@ func (s *SparseFile) availableEnd(off int64) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.present.runEnd(off)
+}
+
+type sparseProgress struct {
+	presentBytes    int64
+	contiguousBytes int64
+	inflightBytes   int64
+	inflightRanges  int
+	presentRanges   int
+}
+
+func (s *SparseFile) progress() sparseProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sparseProgress{
+		presentBytes:    s.present.totalBytes(),
+		contiguousBytes: s.present.runEnd(0),
+		inflightBytes:   s.inflight.totalBytes(),
+		inflightRanges:  len(s.inflight.items),
+		presentRanges:   len(s.present.items),
+	}
 }
 
 // waitByte blocks until off is present, or the file is done / errored / ctx done.

@@ -260,7 +260,7 @@ func (m *JobManager) runRemux(ctx context.Context, job *Job) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 
-	writeErr := copyTee(ctx, job, f, reader)
+	writeErr := copyTee(ctx, job, f, reader, m.logger)
 	closeErr := f.Close()
 	waitErr := wait()
 
@@ -296,6 +296,7 @@ func (m *JobManager) runSparse(ctx context.Context, job *Job) error {
 		case <-stop:
 		}
 	}()
+	go m.logSparseProgress(job, stop)
 
 	var errMu sync.Mutex
 	var firstErr error
@@ -347,18 +348,80 @@ func (m *JobManager) requestFillAt(job *Job, off int64) {
 	}
 	for _, iv := range job.sf.reserve(off, off+job.sf.chunk) {
 		go func(iv interval) {
-			if err := m.fillRange(job.fillCtx, job, iv); err != nil && !errors.Is(err, context.Canceled) {
-				m.logger.Warn("seek-driven fill failed", "id", job.id, "start", iv.start, "end", iv.end, "error", err)
-			}
+			_ = m.fillRange(job.fillCtx, job, iv)
 		}(iv)
 	}
 }
 
+func (m *JobManager) logSparseProgress(job *Job, stop <-chan struct{}) {
+	ticker := time.NewTicker(progressLogInterval)
+	defer ticker.Stop()
+
+	rt := rateTracker{last: time.Now()}
+	for {
+		select {
+		case <-ticker.C:
+			if job.sf == nil {
+				continue
+			}
+			progress := job.sf.progress()
+			m.logger.Debug("sparse download progress",
+				"id", job.id,
+				"present_bytes", progress.presentBytes,
+				"contiguous_bytes", progress.contiguousBytes,
+				"inflight_bytes", progress.inflightBytes,
+				"inflight_ranges", progress.inflightRanges,
+				"present_ranges", progress.presentRanges,
+				"file_size", job.size,
+				"file_pct", percentOfFile(progress.presentBytes, job.size),
+				"contiguous_pct", percentOfFile(progress.contiguousBytes, job.size),
+				"bytes_per_sec", rt.rate(time.Now(), progress.presentBytes),
+			)
+		case <-stop:
+			return
+		}
+	}
+}
+
 // fillRange fetches one reserved range and writes it into the sparse file.
-func (m *JobManager) fillRange(ctx context.Context, job *Job, iv interval) error {
+func (m *JobManager) fillRange(ctx context.Context, job *Job, iv interval) (err error) {
 	defer job.sf.releaseInflight(iv)
 
-	m.logger.Debug("fill range", "id", job.id, "start", iv.start, "end", iv.end)
+	started := time.Now()
+	pos := iv.start
+	rangeBytes := iv.end - iv.start
+	httpRange := fmt.Sprintf("bytes=%d-%d", iv.start, iv.end-1)
+
+	defer func() {
+		duration := time.Since(started)
+		readBytes := pos - iv.start
+		attrs := []any{
+			"id", job.id,
+			"http_range", httpRange,
+			"start", iv.start,
+			"end", iv.end,
+			"pos", pos,
+			"bytes", readBytes,
+			"expected_bytes", rangeBytes,
+			"duration_ms", duration.Milliseconds(),
+			"bytes_per_sec", bytesPerSecond(readBytes, duration),
+			"file_pct", percentOfFile(pos, job.size),
+		}
+		if err != nil {
+			attrs = append(attrs, "error", err)
+			if errors.Is(err, context.Canceled) {
+				if duration >= slowFillThreshold {
+					m.logger.Debug("fill range canceled", attrs...)
+				}
+			} else {
+				m.logger.Warn("fill range failed", attrs...)
+			}
+			return
+		}
+		if duration >= slowFillThreshold {
+			m.logger.Warn("fill range slow", attrs...)
+		}
+	}()
 
 	select {
 	case m.fillSem <- struct{}{}:
@@ -373,7 +436,6 @@ func (m *JobManager) fillRange(ctx context.Context, job *Job, iv interval) error
 	}
 	defer reader.Close()
 
-	pos := iv.start
 	buf := make([]byte, downloadChunkSize)
 	for pos < iv.end {
 		if err := ctx.Err(); err != nil {
@@ -419,7 +481,7 @@ func (m *JobManager) runSequential(ctx context.Context, job *Job) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 
-	writeErr := copyTee(ctx, job, f, reader)
+	writeErr := copyTee(ctx, job, f, reader, m.logger)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return writeErr
@@ -429,8 +491,12 @@ func (m *JobManager) runSequential(ctx context.Context, job *Job) error {
 
 // copyTee streams reader into f in chunks, publishing progress on the job so
 // tailing readers can be woken. Nothing is buffered beyond one chunk.
-func copyTee(ctx context.Context, job *Job, f *os.File, reader io.Reader) error {
+func copyTee(ctx context.Context, job *Job, f *os.File, reader io.Reader, logger *slog.Logger) error {
 	buf := make([]byte, downloadChunkSize)
+	stop := make(chan struct{})
+	defer close(stop)
+	go logSequentialDownloadFirstByteSlow(job, logger, stop)
+	go logDownloadProgress(job, logger, stop)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -451,6 +517,66 @@ func copyTee(ctx context.Context, job *Job, f *os.File, reader io.Reader) error 
 		if rerr != nil {
 			return rerr
 		}
+	}
+}
+
+// logDownloadProgress emits a periodic debug throughput line for a sequential (or
+// remux) download by sampling job.written, mirroring logSparseProgress. It runs
+// until stop is closed at the end of copyTee.
+func logDownloadProgress(job *Job, logger *slog.Logger, stop <-chan struct{}) {
+	ticker := time.NewTicker(progressLogInterval)
+	defer ticker.Stop()
+
+	rt := rateTracker{last: time.Now()}
+	for {
+		select {
+		case <-ticker.C:
+			job.mu.Lock()
+			written := job.written
+			contentLength := job.contentLength
+			job.mu.Unlock()
+			jobSize := job.size
+			if contentLength >= 0 {
+				jobSize = contentLength
+			}
+			logger.Debug("sequential download progress",
+				"id", job.id,
+				"mode", jobMode(job),
+				"bytes", written,
+				"content_length", contentLength,
+				"file_pct", percentOfFile(written, jobSize),
+				"bytes_per_sec", rt.rate(time.Now(), written),
+			)
+		case <-stop:
+			return
+		}
+	}
+}
+
+func logSequentialDownloadFirstByteSlow(job *Job, logger *slog.Logger, stop <-chan struct{}) {
+	timer := time.NewTimer(slowFirstByteThreshold)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		job.mu.Lock()
+		written := job.written
+		contentLength := job.contentLength
+		jobDone := job.done
+		jobErr := job.err
+		job.mu.Unlock()
+		if written == 0 {
+			logger.Warn("sequential download first byte slow",
+				"id", job.id,
+				"mode", jobMode(job),
+				"bytes", written,
+				"content_length", contentLength,
+				"job_done", jobDone,
+				"job_error", jobErr,
+				"wait_ms", slowFirstByteThreshold.Milliseconds(),
+			)
+		}
+	case <-stop:
 	}
 }
 

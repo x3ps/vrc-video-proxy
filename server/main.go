@@ -27,7 +27,10 @@ func main() {
 		os.Exit(1)
 	}
 	if _, err := exec.LookPath(cfg.FfmpegPath); err != nil {
-		logger.Warn("ffmpeg not found; transcoding is not used yet, continuing", "ffmpeg", cfg.FfmpegPath)
+		logger.Warn("ffmpeg not found; HLS/DASH remux and transcoding will be unavailable, continuing", "ffmpeg", cfg.FfmpegPath)
+	} else {
+		// Probe and cache the preferred H.264 encoder once at startup.
+		newFfmpegRunner(cfg.FfmpegPath, logger).h264Encoder()
 	}
 
 	srv, err := NewServer(cfg, logger)

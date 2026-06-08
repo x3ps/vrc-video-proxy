@@ -39,10 +39,10 @@ func TestGetVideoHandlerCacheHitReturnsVideoURL(t *testing.T) {
 		t.Fatalf("write cache file: %v", err)
 	}
 
-	srv.extract = func(Config, string) (ytdlpMetadata, string, error) {
+	srv.extract = extractorFunc(func(context.Context, Config, string) (Extraction, error) {
 		t.Fatal("extract should not be called on cache hit")
-		return nil, "", nil
-	}
+		return Extraction{}, nil
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/getvideo?url=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3D1&avpro=true&source=vrchat", nil)
 	req.Host = "127.0.0.1:8080"
@@ -73,16 +73,20 @@ func TestGetVideoHandlerCacheMissStartsJobAndReturnsLiveURL(t *testing.T) {
 	const sourceURL = "https://example.com/watch?v=2"
 	id := cacheID(sourceURL)
 
-	srv.extract = func(_ Config, rawURL string) (ytdlpMetadata, string, error) {
+	srv.extract = extractorFunc(func(_ context.Context, _ Config, rawURL string) (Extraction, error) {
 		if rawURL != sourceURL {
 			t.Fatalf("extract rawURL = %q", rawURL)
 		}
-		return ytdlpMetadata{
-			"id":    "video-id",
-			"title": "Video Title",
-			"url":   "https://cdn.example.com/stream.mp4",
-		}, "https://cdn.example.com/stream.mp4", nil
-	}
+		return Extraction{
+			Metadata: ytdlpMetadata{
+				"id":    "video-id",
+				"title": "Video Title",
+				"url":   "https://cdn.example.com/stream.mp4",
+			},
+			StreamURL: "https://cdn.example.com/stream.mp4",
+			Endpoint:  EndpointProgressive,
+		}, nil
+	})
 
 	// Block the probe so the job stays active (and never touches the network).
 	release := make(chan struct{})

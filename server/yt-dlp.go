@@ -19,8 +19,11 @@ const progressiveFormat = "best[protocol^=http][acodec!=none][vcodec!=none][ext=
 
 type ytdlpMetadata map[string]any
 
-func extractWithYTDLP(cfg Config, rawURL string) (ytdlpMetadata, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), ytdlpTimeout)
+// ytdlpExtractor is the default Extractor: it shells out to the yt-dlp binary.
+type ytdlpExtractor struct{}
+
+func (ytdlpExtractor) Extract(ctx context.Context, cfg Config, rawURL string) (Extraction, error) {
+	ctx, cancel := context.WithTimeout(ctx, ytdlpTimeout)
 	defer cancel()
 
 	ytdlpPath := cfg.YtdlpPath
@@ -28,6 +31,9 @@ func extractWithYTDLP(cfg Config, rawURL string) (ytdlpMetadata, string, error) 
 		ytdlpPath = "yt-dlp"
 	}
 
+	// progressiveFormat prefers a combined file but ends with "/best", so when a
+	// source only offers HLS/DASH (e.g. live streams) yt-dlp still selects it and
+	// reports its protocol, which classifyEndpoint then routes appropriately.
 	args := []string{"-J", "--no-playlist", "--no-warnings", "-f", progressiveFormat}
 	if cfg.CookiesFile != "" {
 		args = append(args, "--cookies", cfg.CookiesFile)
@@ -40,23 +46,30 @@ func extractWithYTDLP(cfg Config, rawURL string) (ytdlpMetadata, string, error) 
 
 	output, err := cmd.Output()
 	if ctx.Err() != nil {
-		return nil, "", fmt.Errorf("yt-dlp timed out: %w", ctx.Err())
+		return Extraction{}, fmt.Errorf("yt-dlp timed out: %w", ctx.Err())
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("yt-dlp failed: %s", stderr.String())
+		return Extraction{}, fmt.Errorf("yt-dlp failed: %s", stderr.String())
 	}
 
 	var metadata ytdlpMetadata
 	if err := json.Unmarshal(output, &metadata); err != nil {
-		return nil, "", fmt.Errorf("failed to parse yt-dlp JSON: %w", err)
+		return Extraction{}, fmt.Errorf("failed to parse yt-dlp JSON: %w", err)
 	}
 
 	streamURL, err := findStreamURL(metadata)
 	if err != nil {
-		return nil, "", err
+		return Extraction{}, err
 	}
 
-	return metadata, streamURL, nil
+	return Extraction{
+		Metadata:  metadata,
+		StreamURL: streamURL,
+		Endpoint:  classifyEndpoint(metadata, streamURL),
+		IsLive:    boolField(metadata, "is_live"),
+		Transcode: needsTranscode(metadata),
+		Headers:   extractHeaders(metadata),
+	}, nil
 }
 
 func findStreamURL(metadata ytdlpMetadata) (string, error) {

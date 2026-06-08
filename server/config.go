@@ -11,37 +11,51 @@ import (
 )
 
 const (
-	envListen          = "VRCVP_LISTEN"
-	envShutdownTimeout = "VRCVP_SHUTDOWN_TIMEOUT"
-	envCacheDir        = "VRCVP_CACHE_DIR"
-	envCacheMaxSize    = "VRCVP_CACHE_MAX_SIZE"
-	envYtdlpPath       = "VRCVP_YTDLP_PATH"
-	envFfmpegPath      = "VRCVP_FFMPEG_PATH"
-	envCookiesFile     = "VRCVP_COOKIES_FILE"
+	envListen           = "VRCVP_LISTEN"
+	envShutdownTimeout  = "VRCVP_SHUTDOWN_TIMEOUT"
+	envCacheDir         = "VRCVP_CACHE_DIR"
+	envCacheMaxSize     = "VRCVP_CACHE_MAX_SIZE"
+	envYtdlpPath        = "VRCVP_YTDLP_PATH"
+	envFfmpegPath       = "VRCVP_FFMPEG_PATH"
+	envCookiesFile      = "VRCVP_COOKIES_FILE"
+	envSecret           = "VRCVP_SECRET"
+	envSegmentCacheTTL  = "VRCVP_SEGMENT_CACHE_TTL"
+	envSegmentCacheSize = "VRCVP_SEGMENT_CACHE_SIZE"
 )
 
 // defaultCacheMaxSize is the default on-disk cache budget (~10 GiB).
 const defaultCacheMaxSize int64 = 10 << 30
 
+// Defaults for the in-memory segment/manifest cache used by the HLS/DASH paths.
+const (
+	defaultSegmentCacheTTL  = 5 * time.Minute
+	defaultSegmentCacheSize = 512
+)
+
 type Config struct {
-	Listen          string
-	ShutdownTimeout time.Duration
-	CacheDir        string
-	CacheMaxSize    int64
-	YtdlpPath       string
-	FfmpegPath      string
-	CookiesFile     string
-	GameCommand     []string
+	Listen           string
+	ShutdownTimeout  time.Duration
+	CacheDir         string
+	CacheMaxSize     int64
+	YtdlpPath        string
+	FfmpegPath       string
+	CookiesFile      string
+	Secret           string
+	SegmentCacheTTL  time.Duration
+	SegmentCacheSize int
+	GameCommand      []string
 }
 
 func LoadConfig(args []string) (Config, error) {
 	cfg := Config{
-		Listen:          "127.0.0.1:8080",
-		ShutdownTimeout: 5 * time.Second,
-		CacheDir:        defaultCacheDir(),
-		CacheMaxSize:    defaultCacheMaxSize,
-		YtdlpPath:       "yt-dlp",
-		FfmpegPath:      "ffmpeg",
+		Listen:           "127.0.0.1:8080",
+		ShutdownTimeout:  5 * time.Second,
+		CacheDir:         defaultCacheDir(),
+		CacheMaxSize:     defaultCacheMaxSize,
+		YtdlpPath:        "yt-dlp",
+		FfmpegPath:       "ffmpeg",
+		SegmentCacheTTL:  defaultSegmentCacheTTL,
+		SegmentCacheSize: defaultSegmentCacheSize,
 	}
 
 	if value := strings.TrimSpace(os.Getenv(envListen)); value != "" {
@@ -73,6 +87,23 @@ func LoadConfig(args []string) (Config, error) {
 	if value := strings.TrimSpace(os.Getenv(envCookiesFile)); value != "" {
 		cfg.CookiesFile = value
 	}
+	if value := strings.TrimSpace(os.Getenv(envSecret)); value != "" {
+		cfg.Secret = value
+	}
+	if value := strings.TrimSpace(os.Getenv(envSegmentCacheTTL)); value != "" {
+		ttl, err := parseDuration(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", envSegmentCacheTTL, err)
+		}
+		cfg.SegmentCacheTTL = ttl
+	}
+	if value := strings.TrimSpace(os.Getenv(envSegmentCacheSize)); value != "" {
+		size, err := strconv.Atoi(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", envSegmentCacheSize, err)
+		}
+		cfg.SegmentCacheSize = size
+	}
 
 	var cacheMaxSize string
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -83,6 +114,9 @@ func LoadConfig(args []string) (Config, error) {
 	flags.StringVar(&cfg.YtdlpPath, "ytdlp-path", cfg.YtdlpPath, "path to the yt-dlp executable")
 	flags.StringVar(&cfg.FfmpegPath, "ffmpeg-path", cfg.FfmpegPath, "path to the ffmpeg executable (reserved)")
 	flags.StringVar(&cfg.CookiesFile, "cookies-file", cfg.CookiesFile, "optional yt-dlp cookies file")
+	flags.StringVar(&cfg.Secret, "secret", cfg.Secret, "secret for signing segment URLs (random per-process if empty)")
+	flags.DurationVar(&cfg.SegmentCacheTTL, "segment-cache-ttl", cfg.SegmentCacheTTL, "in-memory HLS/DASH segment cache TTL")
+	flags.IntVar(&cfg.SegmentCacheSize, "segment-cache-size", cfg.SegmentCacheSize, "in-memory HLS/DASH segment cache entry count")
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "Usage: %s [options] [-- <game command> [args...]]\n", os.Args[0])
 		fmt.Fprintln(flags.Output())
@@ -90,7 +124,7 @@ func LoadConfig(args []string) (Config, error) {
 		flags.PrintDefaults()
 		fmt.Fprintln(flags.Output())
 		fmt.Fprintln(flags.Output(), "Environment:")
-		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile} {
+		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile, envSecret, envSegmentCacheTTL, envSegmentCacheSize} {
 			fmt.Fprintf(flags.Output(), "  %s\n", name)
 		}
 	}
@@ -118,6 +152,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if cfg.CacheMaxSize <= 0 {
 		return Config{}, fmt.Errorf("cache max size must be greater than zero")
+	}
+	if cfg.SegmentCacheSize < 0 {
+		return Config{}, fmt.Errorf("segment cache size must not be negative")
+	}
+	if cfg.SegmentCacheTTL < 0 {
+		return Config{}, fmt.Errorf("segment cache ttl must not be negative")
 	}
 
 	return cfg, nil

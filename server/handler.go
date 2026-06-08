@@ -9,17 +9,16 @@ import (
 	"strings"
 )
 
-// extractVideo extracts metadata and a playable stream URL for a source URL. It
-// is a package var so tests can substitute a fake extractor.
-var extractVideo = extractWithYTDLP
-
 // Server holds the shared state for the HTTP handlers.
 type Server struct {
-	cfg     Config
-	cache   *Cache
-	jobs    *JobManager
-	logger  *slog.Logger
-	extract func(cfg Config, rawURL string) (ytdlpMetadata, string, error)
+	cfg      Config
+	cache    *Cache
+	jobs     *JobManager
+	logger   *slog.Logger
+	extract  Extractor
+	signer   *URLSigner
+	segCache *MemCache
+	hls      *hlsProxy
 }
 
 // NewServer wires up the cache and job manager for the given config.
@@ -31,12 +30,22 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	signer, err := NewURLSigner(cfg.Secret)
+	if err != nil {
+		return nil, err
+	}
+	segCache := NewMemCache(cfg.SegmentCacheSize, cfg.SegmentCacheTTL)
+	jobs := NewJobManager(cache, logger)
+	jobs.openRemux = newFfmpegRunner(cfg.FfmpegPath, logger).openRemux
 	return &Server{
-		cfg:     cfg,
-		cache:   cache,
-		jobs:    NewJobManager(cache, logger),
-		logger:  logger,
-		extract: extractVideo,
+		cfg:      cfg,
+		cache:    cache,
+		jobs:     jobs,
+		logger:   logger,
+		extract:  ytdlpExtractor{},
+		signer:   signer,
+		segCache: segCache,
+		hls:      newHLSProxy(signer, segCache, logger),
 	}, nil
 }
 
@@ -57,7 +66,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/getvideo", s.getVideoHandler)
 	mux.HandleFunc("/video/", s.videoFileHandler)
 	mux.HandleFunc("/live/", s.liveHandler)
+	mux.HandleFunc("/hls/manifest", s.hlsManifestHandler)
+	mux.HandleFunc("/hls/segment", s.hlsSegmentHandler)
 	return mux
+}
+
+func (s *Server) hlsManifestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.hls.ServeManifest(w, r, s.proxyBase(r))
+}
+
+func (s *Server) hlsSegmentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.hls.ServeSegment(w, r, s.proxyBase(r))
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -100,17 +127,67 @@ func (s *Server) getVideoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache miss: extract metadata + a progressive stream URL, kick off a
-	// background download, and return the live streaming URL.
-	metadata, streamURL, err := s.extract(s.cfg, videoReq.URL)
+	// Cache miss: extract metadata + a stream URL, then route by the kind of
+	// stream. Progressive files download to the disk cache; HLS/DASH take their
+	// own manifest-aware paths.
+	ext, err := s.extract.Extract(r.Context(), s.cfg, videoReq.URL)
 	if err != nil {
 		s.logger.Error("extraction failed", "url", videoReq.URL, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Debug("extracted stream", "url", videoReq.URL, "endpoint", ext.Endpoint, "is_live", ext.IsLive)
 
-	s.jobs.getOrStart(id, streamURL)
+	switch {
+	case ext.Endpoint == EndpointProgressive:
+		s.serveProgressiveMiss(w, r, id, videoReq, ext)
+	case (ext.Endpoint == EndpointHLS || ext.Endpoint == EndpointDASH) && ext.IsLive:
+		// Live HLS is rewritten and live DASH is converted to HLS, both behind the
+		// /hls/manifest endpoint which sniffs the manifest type.
+		s.serveLiveManifestMiss(w, r, videoReq, ext)
+	case ext.Endpoint == EndpointHLS || ext.Endpoint == EndpointDASH:
+		// VOD HLS/DASH: remux into the disk cache and serve like a progressive file.
+		s.serveRemuxMiss(w, r, id, videoReq, ext)
+	default:
+		http.Error(w, "unsupported stream type", http.StatusNotImplemented)
+	}
+}
 
+// serveLiveManifestMiss returns a yt-dlp-like document whose url points at a
+// proxied manifest. The player (AVPro) plays the HLS directly; /hls/manifest
+// rewrites HLS or converts DASH and proxies every child manifest and segment back
+// through this server.
+func (s *Server) serveLiveManifestMiss(w http.ResponseWriter, r *http.Request, videoReq videoRequest, ext Extraction) {
+	manifestURL := s.hls.manifestURL(s.proxyBase(r), ext.StreamURL, headerMap(ext.Headers))
+
+	metadata := ext.Metadata
+	replaceStreamURLs(metadata, manifestURL)
+	metadata["original_url"] = videoReq.URL
+	metadata["_cache"] = "live"
+	writeJSON(w, metadata)
+}
+
+// serveRemuxMiss starts an ffmpeg remux of a VOD HLS/DASH manifest into a single
+// MP4 on disk and returns the live streaming URL, exactly like a progressive
+// miss. Once the remux finishes, subsequent requests are cache hits with full
+// Range/seek support.
+func (s *Server) serveRemuxMiss(w http.ResponseWriter, r *http.Request, id string, videoReq videoRequest, ext Extraction) {
+	s.jobs.getOrStartRemux(id, ext.StreamURL, ext.Transcode, headerMap(ext.Headers))
+
+	metadata := ext.Metadata
+	replaceStreamURLs(metadata, s.playableURL(r, "/live/", id))
+	metadata["ext"] = "mp4"
+	metadata["original_url"] = videoReq.URL
+	metadata["_cache"] = "miss"
+	writeJSON(w, metadata)
+}
+
+// serveProgressiveMiss handles a cache miss for a single progressive file: it
+// starts a background download and returns the live streaming URL.
+func (s *Server) serveProgressiveMiss(w http.ResponseWriter, r *http.Request, id string, videoReq videoRequest, ext Extraction) {
+	s.jobs.getOrStart(id, ext.StreamURL)
+
+	metadata := ext.Metadata
 	replaceStreamURLs(metadata, s.playableURL(r, "/live/", id))
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "miss"
@@ -252,6 +329,13 @@ func (s *Server) playableURL(r *http.Request, prefix, id string) string {
 		Host:   r.Host,
 		Path:   prefix + id + ".mp4",
 	}
+	return u.String()
+}
+
+// proxyBase returns the scheme://host prefix of this server as seen by the
+// client, used to build absolute proxied manifest/segment URLs.
+func (s *Server) proxyBase(r *http.Request) string {
+	u := url.URL{Scheme: requestScheme(r), Host: r.Host}
 	return u.String()
 }
 

@@ -46,9 +46,12 @@ VRChat ──> yt-dlp wrapper ──> GET /api/getvideo?url=...   (this server)
   When the upstream lacks `Range` or a known size, `/live` falls back to
   sequential streaming (`Accept-Ranges: none`).
 - **Progressive vs. HLS/DASH.** A single progressive file is downloaded and cached
-  as-is (no ffmpeg needed). HLS/DASH sources are routed by kind: VOD is remuxed by
-  ffmpeg into one cached MP4, live is proxied in real time (see *Stream vs. video*
-  under [Endpoints](#endpoints)). `ffmpeg` is required only for the HLS/DASH paths.
+  as-is when its codecs are MP4/AVPro-friendly. If codec metadata is incomplete,
+  the server may run `ffprobe` once to decide whether the file needs
+  re-encoding. HLS/DASH sources are routed by kind: VOD is remuxed by `ffmpeg`
+  into one cached MP4, live is proxied in real time (see *Stream vs. video* under
+  [Endpoints](#endpoints)). `ffmpeg` is also used when an extracted stream must be
+  transcoded to H.264/AAC for playback compatibility.
 
 ## Endpoints
 
@@ -71,8 +74,8 @@ every upstream fetch is SSRF-guarded — it is not an open redirect or open prox
 The kind of source decides the serving path:
 
 - **VOD (a finite video)** — HLS with `#EXT-X-ENDLIST`, DASH `MPD@type="static"`, or
-  yt-dlp `is_live=false` — is **remuxed by ffmpeg into a single MP4** on disk (codec
-  copy, or re-encode to H.264/AAC when the source codecs are not MP4-compatible),
+  yt-dlp `is_live=false` — is **remuxed by `ffmpeg` into a single MP4** on disk (codec
+  copy, or re-encoded to H.264/AAC when the source codecs are not MP4-compatible),
   then served exactly like a progressive file via `/live` → `/video` with full
   Range/seek and instant replays from cache.
 - **Live (an unbounded stream)** — Twitch-style live HLS/DASH — cannot be cached, so
@@ -96,8 +99,9 @@ The kind of source decides the serving path:
 - **Live DASH** support covers `SegmentTemplate` + `SegmentTimeline` manifests
   (the common live shape); other MPD shapes return `501`. Live segments are not
   cached across restarts (the in-memory segment cache is process-local).
-- **ffmpeg and ffprobe are required** at startup. ffmpeg handles HLS/DASH remux
-  and transcoding; ffprobe is used for media probing.
+- **yt-dlp, ffmpeg, and ffprobe are required** at startup. `yt-dlp` resolves the
+  source URL, `ffmpeg` handles HLS/DASH remux and transcoding, and `ffprobe` is
+  used for codec probing when yt-dlp metadata is incomplete.
 
 ## Planned features
 
@@ -106,6 +110,21 @@ The kind of source decides the serving path:
 - [ ] Separate audio/video stream support (muxing two distinct tracks; today
   remux/transcode operates on a single combined input).
 - [x] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
+
+## Roadmap / technical debt
+
+- Rewrite the current process wrappers around maintained Go libraries:
+  [`ffmpeg-go`](https://github.com/u2takey/ffmpeg-go),
+  [`go-ffprobe`](https://github.com/vansante/go-ffprobe), and
+  [`go-ytdlp`](https://github.com/lrstanley/go-ytdlp).
+- Refactor the server into focused packages instead of keeping everything in one
+  `main` package, moving the code toward Go best practices and a cleaner
+  architecture with explicit boundaries between configuration, extraction,
+  caching, streaming, transcoding, HTTP handlers, and process/tool adapters.
+- Improve debuggability everywhere: more useful debug logs, clearer correlation
+  between extraction/download/remux/playback requests, better subprocess
+  diagnostics, and enough detail to debug difficult playback failures without
+  guessing. Debug, debug, and debug again.
 
 ## Build
 
@@ -136,6 +155,16 @@ Priority: command-line flags > environment variables > defaults.
 | `VRCVP_SEGMENT_CACHE_SIZE`| `--segment-cache-size`| `512`                             | In-memory live HLS/DASH segment cache entry count. |
 | `VRCVP_LOG_LEVEL`         | `--log-level`      | `info`                               | Log level: `debug`, `info`, `warn`, or `error`. Governs the server's own lines. |
 | `VRCVP_PROXY`             | `--proxy`          | (none)                               | Proxy for **all** upstream traffic and tools, as `protocol://host:port` (`http`, `https`, `socks5`, `socks5h`; userinfo is sent as proxy auth). Routes the Go HTTP client, `yt-dlp`, and `ffmpeg`. When unset, an ambient `HTTP_PROXY`/`HTTPS_PROXY` is still honored. |
+| `VRCVP_YTDLP_FORMAT`      | `--ytdlp-format`   | combined progressive MP4 selector    | yt-dlp `-f` selector. The default prefers a single HTTP MP4 with audio+video, falls back to any combined stream, then to yt-dlp's `best`. |
+| `VRCVP_YTDLP_EXTRA_ARGS_JSON` | `--ytdlp-extra-args-json` | (none)                         | Extra yt-dlp arguments as a JSON string array. JSON preserves spaces in values, e.g. `["--add-headers","User-Agent: Mozilla/5.0"]`. |
+| `VRCVP_FFMPEG_HWACCEL`    | `--ffmpeg-hwaccel` | `software`                           | H.264 encoder backend for transcodes: `software`/`libx264`, `nvenc`, `vaapi`, `qsv`, `videotoolbox`, or `amf`. Hardware backends are opt-in and validated at startup. |
+| `VRCVP_FFMPEG_HW_DEVICE`  | `--ffmpeg-hw-device` | (none)                             | Hardware device for ffmpeg acceleration. Required for `vaapi`, e.g. `/dev/dri/renderD128`. |
+| `VRCVP_TRANSCODE_PRESET`  | `--transcode-preset` | `veryfast`                         | libx264 preset for software transcoding; ignored by hardware encoders. |
+| `VRCVP_TRANSCODE_CRF`     | `--transcode-crf`  | `23`                                 | libx264 CRF for software transcoding, used when `--transcode-video-bitrate` is empty. |
+| `VRCVP_TRANSCODE_VIDEO_BITRATE` | `--transcode-video-bitrate` | (none)                    | Target video bitrate, e.g. `8M`. Overrides CRF for software encoding; hardware encoders default to `8M` when unset. |
+| `VRCVP_TRANSCODE_MAXRATE` | `--transcode-maxrate` | `8M`                              | Video rate cap for transcodes. |
+| `VRCVP_TRANSCODE_BUFSIZE` | `--transcode-bufsize` | `16M`                            | Rate-control buffer size for transcodes. |
+| `VRCVP_TRANSCODE_AUDIO_BITRATE` | `--transcode-audio-bitrate` | `192k`                  | AAC audio bitrate for transcodes. |
 
 `VRCVP_PROXY` makes every outbound request egress through the given proxy: the
 server's own HTTP fetches (probe, range downloads, HLS/DASH proxy), `yt-dlp` (via
@@ -156,8 +185,10 @@ VRCVP_CACHE_MAX_SIZE=20GB \
 ```
 
 The server is required to find `yt-dlp`, `ffmpeg`, and `ffprobe` at startup. The
-preferred H.264 encoder (hardware if available, else `libx264`) is probed once at
-startup.
+H.264 transcode backend defaults to software `libx264`. Hardware encoders are
+used only when selected with `VRCVP_FFMPEG_HWACCEL` / `--ffmpeg-hwaccel`; the
+selected hardware encoder is probed once at startup, and a missing encoder fails
+startup instead of failing the first transcode request.
 
 ## Steam Launch Options
 
@@ -209,8 +240,16 @@ curl -r 0-1023 'http://127.0.0.1:8080/video/<id>.mp4' -o /dev/null -D -
 
 The `./wrapper` command is a yt-dlp-style stub that VRChat invokes instead of
 `yt-dlp`. It finds the first `http(s)` URL in the arguments, calls this server's
-`/api/getvideo`, and writes the JSON response to stdout. The response `url` field
-points back at this server, e.g.:
+`/api/getvideo`, and writes the server response to stdout. For normal VRChat
+calls, that response is a single plain-text playback URL pointing back at this
+server, e.g.:
+
+```text
+http://127.0.0.1:8080/video/<id>.mp4
+```
+
+For Resonite-style calls (`--flat-playlist`, sent as `source=resonite`), the
+server returns yt-dlp-like JSON instead:
 
 ```json
 {

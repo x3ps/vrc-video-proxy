@@ -103,16 +103,10 @@ The kind of source decides the serving path:
   source URL, `ffmpeg` handles HLS/DASH remux and transcoding, and `ffprobe` is
   used for codec probing when yt-dlp metadata is incomplete.
 
-## Planned features
-
-- [x] HLS/DASH live streams, including Twitch-style live URLs.
-- [x] ffmpeg-based remuxing/transcoding pipeline.
-- [ ] Separate audio/video stream support (muxing two distinct tracks; today
-  remux/transcode operates on a single combined input).
-- [x] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
-
 ## Roadmap / technical debt
 
+- Add separate audio/video stream support by muxing two distinct tracks; today
+  remux/transcode operates on a single combined input.
 - Rewrite the current process wrappers around maintained Go libraries:
   [`ffmpeg-go`](https://github.com/u2takey/ffmpeg-go),
   [`go-ffprobe`](https://github.com/vansante/go-ffprobe), and

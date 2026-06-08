@@ -49,6 +49,10 @@ type Job struct {
 	streamURL string
 	tmpPath   string
 
+	remux     bool              // ffmpeg-remux mode (HLS/DASH VOD into a single MP4)
+	transcode bool              // remux mode must re-encode (incompatible codecs)
+	headers   map[string]string // upstream request headers to replay (remux mode)
+
 	ready     chan struct{} // closed once the probe completes
 	size      int64         // total size, -1 when unknown
 	rangeable bool          // sparse mode selected
@@ -70,12 +74,14 @@ type Job struct {
 
 // JobManager starts and deduplicates download jobs keyed by cache id.
 type JobManager struct {
-	cache      *Cache
-	logger     *slog.Logger
-	probe      probeFunc
-	fetchRange rangeFetchFunc
-	fillSem    chan struct{}
-	fillChunk  int64
+	cache         *Cache
+	logger        *slog.Logger
+	probe         probeFunc
+	fetchRange    rangeFetchFunc
+	openRemux     remuxOpener
+	openTranscode remuxOpener
+	fillSem       chan struct{}
+	fillChunk     int64
 
 	mu   sync.Mutex
 	jobs map[string]*Job
@@ -86,19 +92,35 @@ func NewJobManager(cache *Cache, logger *slog.Logger) *JobManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	ff := newFfmpegRunner(defaultFfmpegPath, logger)
 	return &JobManager{
-		cache:      cache,
-		logger:     logger,
-		probe:      httpProbe,
-		fetchRange: httpFetchRange,
-		fillSem:    make(chan struct{}, maxConcurrentFills),
-		fillChunk:  maxFillChunk,
-		jobs:       make(map[string]*Job),
+		cache:         cache,
+		logger:        logger,
+		probe:         httpProbe,
+		fetchRange:    httpFetchRange,
+		openRemux:     ff.openRemux,
+		openTranscode: ff.openTranscode,
+		fillSem:       make(chan struct{}, maxConcurrentFills),
+		fillChunk:     maxFillChunk,
+		jobs:          make(map[string]*Job),
 	}
 }
 
-// getOrStart returns the active job for id, starting a new one if none exists.
+// getOrStart returns the active progressive-download job for id, starting a new
+// one if none exists.
 func (m *JobManager) getOrStart(id, streamURL string) *Job {
+	return m.startJob(id, streamURL, false, false, nil)
+}
+
+// getOrStartRemux returns the active job for id, starting a new ffmpeg-remux job
+// (HLS/DASH VOD into a single MP4) if none exists. headers are replayed upstream;
+// transcode forces re-encoding instead of a stream copy.
+func (m *JobManager) getOrStartRemux(id, streamURL string, transcode bool, headers map[string]string) *Job {
+	return m.startJob(id, streamURL, true, transcode, headers)
+}
+
+// startJob deduplicates by id and launches the appropriate run loop.
+func (m *JobManager) startJob(id, streamURL string, remux, transcode bool, headers map[string]string) *Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -110,6 +132,9 @@ func (m *JobManager) getOrStart(id, streamURL string) *Job {
 		id:            id,
 		streamURL:     streamURL,
 		tmpPath:       m.cache.tempPath(id, randomToken()),
+		remux:         remux,
+		transcode:     transcode,
+		headers:       headers,
 		ready:         make(chan struct{}),
 		size:          -1,
 		contentLength: -1,
@@ -134,7 +159,19 @@ func (m *JobManager) run(job *Job) {
 	defer cancel()
 	job.fillCtx = ctx
 
-	m.logger.Info("download job started", "id", job.id)
+	m.logger.Info("download job started", "id", job.id, "mode", jobMode(job))
+
+	// Remux jobs have no probeable size: ffmpeg produces a fragmented MP4 stream
+	// that is tailed sequentially, then finalized like any other download.
+	if job.remux {
+		close(job.ready)
+		err := m.runRemux(ctx, job)
+		if err == nil {
+			err = m.cache.finalize(job.tmpPath, job.id)
+		}
+		m.finishJob(job, err)
+		return
+	}
 
 	size, rangeable, err := m.probe(ctx, job.streamURL)
 	if err == nil {
@@ -163,6 +200,12 @@ func (m *JobManager) run(job *Job) {
 		}
 	}
 
+	m.finishJob(job, err)
+}
+
+// finishJob records terminal state, drops the job from the registry (so a later
+// request can retry), and cleans up the temp file on failure.
+func (m *JobManager) finishJob(job *Job, err error) {
 	if job.sf != nil {
 		job.sf.markDone(err)
 	}
@@ -172,7 +215,6 @@ func (m *JobManager) run(job *Job) {
 	job.cond.Broadcast()
 	job.mu.Unlock()
 
-	// Drop the job so a later request can retry, whether it succeeded or failed.
 	m.mu.Lock()
 	delete(m.jobs, job.id)
 	m.mu.Unlock()
@@ -186,10 +228,45 @@ func (m *JobManager) run(job *Job) {
 }
 
 func jobMode(job *Job) string {
-	if job.rangeable {
+	switch {
+	case job.remux:
+		return "remux"
+	case job.rangeable:
 		return "sparse"
+	default:
+		return "sequential"
 	}
-	return "sequential"
+}
+
+// runRemux streams ffmpeg's remuxed MP4 output into the temp file, publishing
+// progress so a tailReader can serve /live while the remux runs.
+func (m *JobManager) runRemux(ctx context.Context, job *Job) error {
+	open := m.openRemux
+	if job.transcode {
+		open = m.openTranscode
+	}
+	reader, wait, err := open(ctx, job.streamURL, job.headers)
+	if err != nil {
+		return fmt.Errorf("start remux: %w", err)
+	}
+	defer reader.Close()
+
+	f, err := os.Create(job.tmpPath)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+
+	writeErr := copyTee(ctx, job, f, reader)
+	closeErr := f.Close()
+	waitErr := wait()
+
+	if writeErr != nil {
+		return writeErr
+	}
+	if waitErr != nil {
+		return waitErr
+	}
+	return closeErr
 }
 
 // runSparse fills the sparse file sequentially from the lowest gap upward (one
@@ -447,7 +524,7 @@ func httpProbe(ctx context.Context, rawURL string) (int64, bool, error) {
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Range", "bytes=0-0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return 0, false, err
 	}
@@ -486,7 +563,7 @@ func httpFetchRange(ctx context.Context, rawURL string, start, end int64) (io.Re
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +623,9 @@ func guardUpstreamURL(ctx context.Context, rawURL string) error {
 	return nil
 }
 
-func isDisallowedIP(ip netip.Addr) bool {
+// isDisallowedIP reports whether an upstream IP is in a forbidden range. It is a
+// package var so tests can relax it to reach a loopback httptest server.
+var isDisallowedIP = func(ip netip.Addr) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }

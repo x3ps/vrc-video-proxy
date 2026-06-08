@@ -259,7 +259,7 @@ func (s *Server) videoFileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serveCachedFile(w, r, path)
+	serveCachedFile(w, r, path, s.logger.With("id", id))
 }
 
 func (s *Server) liveHandler(w http.ResponseWriter, r *http.Request) {
@@ -274,9 +274,12 @@ func (s *Server) liveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reqLog := s.logger.With("id", id, "range", r.Header.Get("Range"))
+
 	// If the download already completed, serve the finished file with Range
 	// support instead of tailing.
 	if s.serveIfCached(w, r, id) {
+		reqLog.Debug("live request served from cache", "mode", "cached")
 		return
 	}
 
@@ -284,6 +287,7 @@ func (s *Server) liveHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// No active job and not cached: maybe it finished after the Has() check.
 		if !s.serveIfCached(w, r, id) {
+			reqLog.Debug("live request: no job and not cached", "status", http.StatusNotFound)
 			http.NotFound(w, r)
 		}
 		return
@@ -293,10 +297,12 @@ func (s *Server) liveHandler(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-job.ready:
 	case <-r.Context().Done():
+		reqLog.Debug("client gone while awaiting probe")
 		return
 	}
 
 	if job.probeErr != nil {
+		reqLog.Warn("upstream probe failed", "error", job.probeErr)
 		if !s.serveIfCached(w, r, id) {
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		}
@@ -305,14 +311,17 @@ func (s *Server) liveHandler(w http.ResponseWriter, r *http.Request) {
 
 	// The download may have finished while we waited.
 	if s.serveIfCached(w, r, id) {
+		reqLog.Debug("live request served from cache (finished during probe)", "mode", "cached")
 		return
 	}
 
 	if job.rangeable && job.sf != nil {
-		serveSparse(w, r, job, s.jobs)
+		reqLog.Debug("routing live request", "mode", "sparse")
+		serveSparse(w, r, job, s.jobs, reqLog)
 		return
 	}
-	serveLive(w, r, job)
+	reqLog.Debug("routing live request", "mode", "sequential")
+	serveLive(w, r, job, reqLog)
 }
 
 // serveIfCached serves the finished cache entry for id if present, returning true
@@ -326,7 +335,7 @@ func (s *Server) serveIfCached(w http.ResponseWriter, r *http.Request, id string
 		http.NotFound(w, r)
 		return true
 	}
-	serveCachedFile(w, r, path)
+	serveCachedFile(w, r, path, s.logger.With("id", id))
 	return true
 }
 

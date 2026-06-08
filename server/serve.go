@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,9 +23,10 @@ func clearWriteDeadline(w http.ResponseWriter) {
 
 // serveCachedFile serves a finished cache entry with full HEAD/Range support via
 // http.ServeContent.
-func serveCachedFile(w http.ResponseWriter, r *http.Request, path string) {
+func serveCachedFile(w http.ResponseWriter, r *http.Request, path string, logger *slog.Logger) {
 	f, err := os.Open(path)
 	if err != nil {
+		logger.Debug("cached file open failed", "path", path, "error", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -31,10 +34,12 @@ func serveCachedFile(w http.ResponseWriter, r *http.Request, path string) {
 
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
+		logger.Debug("cached file stat failed", "path", path, "error", err, "is_dir", err == nil && info.IsDir())
 		http.NotFound(w, r)
 		return
 	}
 
+	logger.Debug("serving cached file", "range", r.Header.Get("Range"), "size", info.Size(), "method", r.Method)
 	clearWriteDeadline(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	// ServeContent handles HEAD, Range, 206, Content-Range, Content-Length and
@@ -45,11 +50,12 @@ func serveCachedFile(w http.ResponseWriter, r *http.Request, path string) {
 
 // serveLive streams a download-in-progress to the client as it is written to
 // disk. It serves sequentially from offset 0 and does not support Range.
-func serveLive(w http.ResponseWriter, r *http.Request, job *Job) {
+func serveLive(w http.ResponseWriter, r *http.Request, job *Job, logger *slog.Logger) {
 	reader, err := newTailReader(r.Context(), job)
 	if err != nil {
 		// The temp file may have been finalized (renamed) between the cache miss
 		// check and now; let the caller fall back to the cached file.
+		logger.Debug("live stream unavailable (file finalized)", "error", err)
 		http.Error(w, "live stream unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -66,17 +72,20 @@ func serveLive(w http.ResponseWriter, r *http.Request, job *Job) {
 		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 	}
 
+	logger.Debug("serving live (sequential)", "content_length", contentLength, "head", r.Method == http.MethodHead)
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	_, err = io.Copy(w, reader)
+	n, err := io.Copy(w, reader)
 	if err != nil && !errors.Is(err, r.Context().Err()) {
 		// Client disconnects and context cancellation are expected; nothing to do
 		// but stop. The background job keeps running and still fills the cache.
+		logger.Debug("live stream copy ended early", "bytes", n, "error", err)
 		return
 	}
+	logger.Debug("live stream served", "bytes", n)
 }
 
 // parseSingleRange parses a single HTTP byte range against a known size.
@@ -137,7 +146,7 @@ func parseSingleRange(header string, size int64) (start, end int64, ok, satisfia
 // serveSparse serves a sparse (Range-capable) download in progress. It honors
 // HTTP Range with 206/Content-Range and triggers on-demand back-fill so a seek
 // ahead of the sequential filler is served from its own upstream fetch.
-func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager) {
+func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager, logger *slog.Logger) {
 	sf := job.sf
 	size := job.size
 
@@ -146,11 +155,13 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 	h.Set("Content-Type", "video/mp4")
 	h.Set("Accept-Ranges", "bytes")
 
+	rangeHeader := r.Header.Get("Range")
 	start, end := int64(0), size-1
 	status := http.StatusOK
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+	if rangeHeader != "" {
 		s, e, ok, satisfiable := parseSingleRange(rangeHeader, size)
 		if !satisfiable {
+			logger.Warn("range not satisfiable", "raw_range", rangeHeader, "size", size)
 			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 			http.Error(w, "requested range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 			return
@@ -162,6 +173,10 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 		}
 	}
 
+	logger.Debug("serving sparse range",
+		"raw_range", rangeHeader, "start", start, "end", end, "size", size,
+		"status", status, "partial", status == http.StatusPartialContent, "method", r.Method)
+
 	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
@@ -170,6 +185,7 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 
 	rf, err := os.Open(job.tmpPath)
 	if err != nil {
+		logger.Debug("sparse temp file open failed (likely finalized)", "path", job.tmpPath, "error", err)
 		return // file already finalized; the player will re-request and hit cache
 	}
 	defer rf.Close()
@@ -189,8 +205,20 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 	pos := start
 	for pos <= end {
 		m.requestFillAt(job, pos)
+		// Log how long a seek waits for its bytes: if pos is not already present,
+		// the read blocks on an upstream fill, which is where slow/failed seeks show.
+		waitStart := time.Now()
+		blocked := sf.availableEnd(pos) <= pos
 		if err := sf.waitByte(ctx, pos); err != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				logger.Debug("client gone while awaiting bytes", "pos", pos, "error", err)
+			} else {
+				logger.Warn("failed waiting for sparse bytes", "pos", pos, "error", err)
+			}
 			return
+		}
+		if blocked {
+			logger.Debug("seek fill latency", "pos", pos, "wait_ms", time.Since(waitStart).Milliseconds())
 		}
 		limit := min(sf.availableEnd(pos), end+1)
 		for pos < limit {
@@ -198,6 +226,7 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 			rn, rerr := rf.ReadAt(buf[:n], pos)
 			if rn > 0 {
 				if _, werr := w.Write(buf[:rn]); werr != nil {
+					logger.Debug("client write failed (pause/disconnect)", "pos", pos, "error", werr)
 					return
 				}
 				pos += int64(rn)
@@ -207,4 +236,5 @@ func serveSparse(w http.ResponseWriter, r *http.Request, job *Job, m *JobManager
 			}
 		}
 	}
+	logger.Debug("sparse range served", "start", start, "served_to", pos, "bytes", pos-start)
 }

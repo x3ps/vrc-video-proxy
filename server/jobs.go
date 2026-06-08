@@ -188,6 +188,8 @@ func (m *JobManager) run(job *Job) {
 	job.probeErr = err
 	close(job.ready)
 
+	m.logger.Debug("probe result", "id", job.id, "size", size, "rangeable", rangeable, "error", err)
+
 	// Log after the probe so the reported mode (sparse vs sequential) is accurate.
 	m.logger.Info("download job started", "id", job.id, "mode", jobMode(job))
 
@@ -345,7 +347,9 @@ func (m *JobManager) requestFillAt(job *Job, off int64) {
 	}
 	for _, iv := range job.sf.reserve(off, off+job.sf.chunk) {
 		go func(iv interval) {
-			_ = m.fillRange(job.fillCtx, job, iv)
+			if err := m.fillRange(job.fillCtx, job, iv); err != nil && !errors.Is(err, context.Canceled) {
+				m.logger.Warn("seek-driven fill failed", "id", job.id, "start", iv.start, "end", iv.end, "error", err)
+			}
 		}(iv)
 	}
 }
@@ -353,6 +357,8 @@ func (m *JobManager) requestFillAt(job *Job, off int64) {
 // fillRange fetches one reserved range and writes it into the sparse file.
 func (m *JobManager) fillRange(ctx context.Context, job *Job, iv interval) error {
 	defer job.sf.releaseInflight(iv)
+
+	m.logger.Debug("fill range", "id", job.id, "start", iv.start, "end", iv.end)
 
 	select {
 	case m.fillSem <- struct{}{}:

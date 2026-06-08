@@ -40,10 +40,10 @@ VRChat ──> yt-dlp wrapper ──> GET /api/getvideo?url=...   (this server)
   (default 3), and identical in-flight gaps for the same video are de-duplicated.
   When the upstream lacks `Range` or a known size, `/live` falls back to
   sequential streaming (`Accept-Ranges: none`).
-- **Transcoding is not performed yet.** The raw progressive stream is cached as-is.
-  yt-dlp is asked for a single file that already contains both audio and video, so
-  no muxing is required. `ffmpeg` is therefore *not required* to run the server
-  (the `VRCVP_FFMPEG_PATH` setting is reserved for a future transcode step).
+- **Progressive vs. HLS/DASH.** A single progressive file is downloaded and cached
+  as-is (no ffmpeg needed). HLS/DASH sources are routed by kind: VOD is remuxed by
+  ffmpeg into one cached MP4, live is proxied in real time (see *Stream vs. video*
+  under [Endpoints](#endpoints)). `ffmpeg` is required only for the HLS/DASH paths.
 
 ## Endpoints
 
@@ -53,10 +53,27 @@ VRChat ──> yt-dlp wrapper ──> GET /api/getvideo?url=...   (this server)
 | GET         | `/api/getvideo`       | Query: `url` (required, absolute http/https), `avpro` (bool), `source` (default `vrchat`). Returns yt-dlp-like JSON. |
 | GET, HEAD   | `/video/<id>.mp4`     | Serves a **finished** cached file via `http.ServeContent`: HEAD, `Range`, `206 Partial Content`, `Content-Length`, `Content-Range`, `Accept-Ranges: bytes`, `Content-Type: video/mp4`. |
 | GET, HEAD   | `/live/<id>.mp4`      | Streams a download-in-progress. In **sparse mode** it honors `Range`/`206`/`Content-Range` and back-fills on seek; in the **sequential fallback** it streams from offset 0 with `Accept-Ranges: none`. If the download has already finished, it transparently serves the cached file with full Range support. |
+| GET, HEAD   | `/hls/manifest`       | Query: `t` (a signed token carrying an upstream manifest URL + headers). Fetches a **live** HLS or DASH manifest, rewrites/﻿converts it to HLS pointing back at this server, and returns it (`application/vnd.apple.mpegurl`, `Cache-Control: no-store`). |
+| GET, HEAD   | `/hls/segment`        | Query: `t` (signed token). Proxies a live HLS/DASH segment, init section, or key, served from a short-lived in-memory cache with concurrent-fetch de-duplication. |
 
 `<id>` must be a 64-character lowercase hex string; anything else returns 404, so
-path traversal is impossible. The server only fetches the upstream URL that yt-dlp
-extracted for the user's requested `url` — it is not an open redirect or open proxy.
+path traversal is impossible. The server only fetches upstream URLs that it
+extracted (progressive) or that it signed itself (manifest/segment tokens), and
+every upstream fetch is SSRF-guarded — it is not an open redirect or open proxy.
+
+### Stream vs. video: how HLS/DASH is handled
+
+The kind of source decides the serving path:
+
+- **VOD (a finite video)** — HLS with `#EXT-X-ENDLIST`, DASH `MPD@type="static"`, or
+  yt-dlp `is_live=false` — is **remuxed by ffmpeg into a single MP4** on disk (codec
+  copy, or re-encode to H.264/AAC when the source codecs are not MP4-compatible),
+  then served exactly like a progressive file via `/live` → `/video` with full
+  Range/seek and instant replays from cache.
+- **Live (an unbounded stream)** — Twitch-style live HLS/DASH — cannot be cached, so
+  it is **proxied in real time**: `/hls/manifest` rewrites the playlist (or converts
+  a DASH MPD to HLS) and `/hls/segment` proxies the segments with a short in-memory
+  TTL cache. AVPro plays the HLS directly.
 
 ### Realtime playback limitations
 
@@ -69,16 +86,20 @@ extracted for the user's requested `url` — it is not an open redirect or open 
   connections; this is a known caveat.
 - In-progress (sparse) downloads are **not resumed across restarts** — `tmp/` is
   cleared on startup; only finished `<id>.mp4` files persist.
-- Only single-file progressive streams are cached.
-- **Transcoding is not performed yet:** the raw progressive stream is cached as-is,
-  so `faststart`/`moov`-at-front depends on the upstream file (`VRCVP_FFMPEG_PATH`
-  is reserved for a future transcode step; `ffmpeg` is not required to run).
+- Progressive sources are cached as a single file; HLS/DASH VOD is remuxed into one
+  MP4 (see above) and then cached the same way.
+- **Live DASH** support covers `SegmentTemplate` + `SegmentTimeline` manifests
+  (the common live shape); other MPD shapes return `501`. Live segments are not
+  cached across restarts (the in-memory segment cache is process-local).
+- **ffmpeg is required** for HLS/DASH remux and transcoding. It remains optional if
+  you only use progressive sources; a warning is logged if it is missing.
 
 ## Planned features
 
-- [ ] HLS/DASH live streams, including Twitch-style live URLs.
-- [ ] ffmpeg-based remuxing/transcoding pipeline.
-- [ ] Separate audio/video stream support.
+- [x] HLS/DASH live streams, including Twitch-style live URLs.
+- [x] ffmpeg-based remuxing/transcoding pipeline.
+- [ ] Separate audio/video stream support (muxing two distinct tracks; today
+  remux/transcode operates on a single combined input).
 - [ ] Configurable logging modes: `debug`, `info`, `warn`, and `error`.
 
 ## Build
@@ -102,8 +123,11 @@ Priority: command-line flags > environment variables > defaults.
 | `VRCVP_CACHE_DIR`         | `--cache-dir`      | OS user cache dir `/vrc-video-proxy` | Directory for cached videos. |
 | `VRCVP_CACHE_MAX_SIZE`    | `--cache-max-size` | `10GB`                               | Cache budget (`10GB`, `500MB`, `1.5G`, or raw bytes). LRU eviction by mtime. |
 | `VRCVP_YTDLP_PATH`        | `--ytdlp-path`     | `yt-dlp`                             | Path to the yt-dlp executable (required). |
-| `VRCVP_FFMPEG_PATH`       | `--ffmpeg-path`    | `ffmpeg`                             | Path to ffmpeg (reserved; not required). |
+| `VRCVP_FFMPEG_PATH`       | `--ffmpeg-path`    | `ffmpeg`                             | Path to ffmpeg (required for HLS/DASH remux and transcoding). |
 | `VRCVP_COOKIES_FILE`      | `--cookies-file`   | (none)                               | Optional yt-dlp cookies file. |
+| `VRCVP_SECRET`            | `--secret`         | (random per process)                 | Secret for signing manifest/segment URLs. Set a fixed value if exposing the proxy publicly so tokens survive restarts. |
+| `VRCVP_SEGMENT_CACHE_TTL` | `--segment-cache-ttl` | `5m`                              | In-memory live HLS/DASH segment cache TTL. |
+| `VRCVP_SEGMENT_CACHE_SIZE`| `--segment-cache-size`| `512`                             | In-memory live HLS/DASH segment cache entry count. |
 
 The wrapper reads `VRCVP_SERVER_URL` and defaults to `http://127.0.0.1:8080`.
 
@@ -113,8 +137,11 @@ VRCVP_CACHE_MAX_SIZE=20GB \
 ./vrc-video-proxy-server --listen 127.0.0.1:9090
 ```
 
-The server is required to find `yt-dlp` at startup. `ffmpeg` is optional: a warning
-is logged if it is missing, but the server still runs.
+The server is required to find `yt-dlp` at startup. `ffmpeg` is optional but
+needed for HLS/DASH: a warning is logged if it is missing and the server still
+runs, but HLS/DASH remux and transcoding will be unavailable. When `ffmpeg` is
+present the preferred H.264 encoder (hardware if available, else `libx264`) is
+probed once at startup.
 
 ## Steam Launch Options
 

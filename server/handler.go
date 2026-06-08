@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Server holds the shared state for the HTTP handlers.
@@ -68,7 +69,54 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/live/", s.liveHandler)
 	mux.HandleFunc("/hls/manifest", s.hlsManifestHandler)
 	mux.HandleFunc("/hls/segment", s.hlsSegmentHandler)
-	return mux
+	return s.logRequests(mux)
+}
+
+// loggingResponseWriter records the response status and byte count for the access
+// log. It implements Unwrap so http.NewResponseController (used to clear the write
+// deadline for long streams) and optional interfaces like http.Flusher still reach
+// the underlying writer.
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (w *loggingResponseWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *loggingResponseWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// logRequests wraps the mux with a debug-level access log: one correlated line per
+// request once it completes, capturing the Range header, status, bytes and
+// duration. At info level it is silent. A hung seek shows as a long duration_ms
+// with few bytes; a paused stream shows as a short-lived request that ended early.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lw := &loggingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(lw, r)
+		s.logger.Debug("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"range", r.Header.Get("Range"),
+			"status", lw.status,
+			"bytes", lw.bytes,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
+	})
 }
 
 func (s *Server) hlsManifestHandler(w http.ResponseWriter, r *http.Request) {

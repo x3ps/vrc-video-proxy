@@ -183,6 +183,57 @@ func TestLoadConfigRejectsInvalidLogLevel(t *testing.T) {
 	}
 }
 
+func TestLoadConfigProxy(t *testing.T) {
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Proxy != "" {
+		t.Fatalf("default Proxy = %q, want empty", cfg.Proxy)
+	}
+
+	t.Setenv(envProxy, "http://127.0.0.1:8888")
+	cfg, err = LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Proxy != "http://127.0.0.1:8888" {
+		t.Fatalf("Proxy from env = %q, want http://127.0.0.1:8888", cfg.Proxy)
+	}
+
+	cfg, err = LoadConfig([]string{"--proxy", "socks5://127.0.0.1:1080"})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("Proxy from flag = %q, want socks5://127.0.0.1:1080 (flag overrides env)", cfg.Proxy)
+	}
+}
+
+func TestLoadConfigRejectsInvalidProxy(t *testing.T) {
+	for _, proxy := range []string{"ftp://127.0.0.1:21", "socks4://127.0.0.1:1080", "http://", "://nohost"} {
+		if _, err := LoadConfig([]string{"--proxy", proxy}); err == nil {
+			t.Fatalf("LoadConfig accepted invalid proxy %q, want error", proxy)
+		}
+	}
+}
+
+func TestParseProxyURL(t *testing.T) {
+	if u, err := parseProxyURL(""); err != nil || u != nil {
+		t.Fatalf("parseProxyURL(\"\") = %v, %v; want nil, nil", u, err)
+	}
+	for _, in := range []string{"http://host:8080", "https://host:8080", "socks5://host:1080", "socks5h://host:1080"} {
+		if _, err := parseProxyURL(in); err != nil {
+			t.Fatalf("parseProxyURL(%q) returned error: %v", in, err)
+		}
+	}
+	for _, in := range []string{"ftp://host:21", "socks4://host:1080", "http://", "not a url"} {
+		if _, err := parseProxyURL(in); err == nil {
+			t.Fatalf("parseProxyURL(%q) = nil error, want error", in)
+		}
+	}
+}
+
 func TestLoadConfigKeepsGameCommandAfterSeparator(t *testing.T) {
 	cfg, err := LoadConfig([]string{
 		"--listen", "127.0.0.1:9090",

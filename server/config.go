@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,7 @@ const (
 	envSegmentCacheTTL  = "VRCVP_SEGMENT_CACHE_TTL"
 	envSegmentCacheSize = "VRCVP_SEGMENT_CACHE_SIZE"
 	envLogLevel         = "VRCVP_LOG_LEVEL"
+	envProxy            = "VRCVP_PROXY"
 )
 
 // defaultCacheMaxSize is the default on-disk cache budget (~10 GiB).
@@ -45,6 +47,7 @@ type Config struct {
 	SegmentCacheTTL  time.Duration
 	SegmentCacheSize int
 	LogLevel         string
+	Proxy            string
 	GameCommand      []string
 }
 
@@ -110,6 +113,9 @@ func LoadConfig(args []string) (Config, error) {
 	if value := strings.TrimSpace(os.Getenv(envLogLevel)); value != "" {
 		cfg.LogLevel = value
 	}
+	if value := strings.TrimSpace(os.Getenv(envProxy)); value != "" {
+		cfg.Proxy = value
+	}
 
 	var cacheMaxSize string
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -124,6 +130,7 @@ func LoadConfig(args []string) (Config, error) {
 	flags.DurationVar(&cfg.SegmentCacheTTL, "segment-cache-ttl", cfg.SegmentCacheTTL, "in-memory HLS/DASH segment cache TTL")
 	flags.IntVar(&cfg.SegmentCacheSize, "segment-cache-size", cfg.SegmentCacheSize, "in-memory HLS/DASH segment cache entry count")
 	flags.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn or error")
+	flags.StringVar(&cfg.Proxy, "proxy", cfg.Proxy, "proxy for all upstream traffic and tools, e.g. http://host:port or socks5://host:port")
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "Usage: %s [options] [-- <game command> [args...]]\n", os.Args[0])
 		fmt.Fprintln(flags.Output())
@@ -131,7 +138,7 @@ func LoadConfig(args []string) (Config, error) {
 		flags.PrintDefaults()
 		fmt.Fprintln(flags.Output())
 		fmt.Fprintln(flags.Output(), "Environment:")
-		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile, envSecret, envSegmentCacheTTL, envSegmentCacheSize, envLogLevel} {
+		for _, name := range []string{envListen, envShutdownTimeout, envCacheDir, envCacheMaxSize, envYtdlpPath, envFfmpegPath, envCookiesFile, envSecret, envSegmentCacheTTL, envSegmentCacheSize, envLogLevel, envProxy} {
 			fmt.Fprintf(flags.Output(), "  %s\n", name)
 		}
 	}
@@ -169,8 +176,34 @@ func LoadConfig(args []string) (Config, error) {
 	if _, err := parseLogLevel(cfg.LogLevel); err != nil {
 		return Config{}, err
 	}
+	if _, err := parseProxyURL(cfg.Proxy); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+// parseProxyURL parses and validates an upstream proxy URL. An empty value means
+// "no proxy" and returns (nil, nil). Only the schemes honored by all three egress
+// paths (Go's http.Transport, yt-dlp and ffmpeg) are accepted.
+func parseProxyURL(value string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", value, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q (want http, https, socks5 or socks5h)", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("proxy URL %q must include a host", value)
+	}
+	return u, nil
 }
 
 // defaultCacheDir returns the default cache location, preferring the user cache

@@ -30,6 +30,8 @@ func main() {
 	slog.SetDefault(logger)
 	logger.Debug("logging configured", "level", level.String())
 
+	configureProxy(logger, cfg)
+
 	if err := checkRequiredExecutables(exec.LookPath, cfg.YtdlpPath); err != nil {
 		logger.Error("failed startup dependency check", "error", err)
 		os.Exit(1)
@@ -59,6 +61,32 @@ func main() {
 
 	exitCode := runServer(logger, server, cfg)
 	os.Exit(exitCode)
+}
+
+// configureProxy routes all upstream traffic and tools through cfg.Proxy when set.
+// It reassigns the shared Go client (done before the server goroutine starts, so it
+// is single-goroutine and race-free) and exports the proxy environment variables the
+// yt-dlp and ffmpeg subprocesses inherit. cfg.Proxy was already validated by
+// LoadConfig, so parseProxyURL cannot fail here.
+func configureProxy(logger *slog.Logger, cfg Config) {
+	proxyURL, _ := parseProxyURL(cfg.Proxy)
+	if proxyURL == nil {
+		return
+	}
+
+	sharedHTTPClient = newUpstreamHTTPClient(proxyURL)
+
+	switch proxyURL.Scheme {
+	case "socks5", "socks5h":
+		// ffmpeg reads socks_proxy for SOCKS5 input URLs.
+		os.Setenv("socks_proxy", cfg.Proxy)
+	default:
+		// ffmpeg (and other CONNECT-based tooling) reads the lowercase env vars.
+		os.Setenv("http_proxy", cfg.Proxy)
+		os.Setenv("https_proxy", cfg.Proxy)
+	}
+
+	logger.Info("upstream proxy enabled", "scheme", proxyURL.Scheme, "host", proxyURL.Host)
 }
 
 func runServer(logger *slog.Logger, server *http.Server, cfg Config) int {

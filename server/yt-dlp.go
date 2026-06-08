@@ -38,6 +38,9 @@ func (ytdlpExtractor) Extract(ctx context.Context, cfg Config, rawURL string) (E
 	if cfg.CookiesFile != "" {
 		args = append(args, "--cookies", cfg.CookiesFile)
 	}
+	if cfg.Proxy != "" {
+		args = append(args, "--proxy", cfg.Proxy)
+	}
 	args = append(args, "--", rawURL)
 
 	cmd := exec.CommandContext(ctx, ytdlpPath, args...)

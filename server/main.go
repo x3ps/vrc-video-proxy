@@ -42,6 +42,9 @@ func main() {
 		// Probe and cache the preferred H.264 encoder once at startup.
 		newFfmpegRunner(cfg.FfmpegPath, logger).h264Encoder()
 	}
+	if _, err := exec.LookPath(cfg.FfprobePath); err != nil {
+		logger.Warn("ffprobe not found; media probing will be unavailable, continuing", "ffprobe", cfg.FfprobePath)
+	}
 
 	srv, err := NewServer(cfg, logger)
 	if err != nil {

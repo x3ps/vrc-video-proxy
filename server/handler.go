@@ -123,7 +123,7 @@ func (s *Server) getVideoHandler(w http.ResponseWriter, r *http.Request) {
 			"original_url": videoReq.URL,
 			"_cache":       "hit",
 		}
-		writeJSON(w, metadata)
+		writeVideoResponse(w, videoReq.Source, metadata)
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Server) serveLiveManifestMiss(w http.ResponseWriter, r *http.Request, v
 	replaceStreamURLs(metadata, manifestURL)
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "live"
-	writeJSON(w, metadata)
+	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
 // serveRemuxMiss starts an ffmpeg remux of a VOD HLS/DASH manifest into a single
@@ -179,7 +179,7 @@ func (s *Server) serveRemuxMiss(w http.ResponseWriter, r *http.Request, id strin
 	metadata["ext"] = "mp4"
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "miss"
-	writeJSON(w, metadata)
+	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
 // serveProgressiveMiss handles a cache miss for a single progressive file: it
@@ -191,7 +191,7 @@ func (s *Server) serveProgressiveMiss(w http.ResponseWriter, r *http.Request, id
 	replaceStreamURLs(metadata, s.playableURL(r, "/live/", id))
 	metadata["original_url"] = videoReq.URL
 	metadata["_cache"] = "miss"
-	writeJSON(w, metadata)
+	writeVideoResponse(w, videoReq.Source, metadata)
 }
 
 func (s *Server) videoFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +337,21 @@ func (s *Server) playableURL(r *http.Request, prefix, id string) string {
 func (s *Server) proxyBase(r *http.Request) string {
 	u := url.URL{Scheme: requestScheme(r), Host: r.Host}
 	return u.String()
+}
+
+// writeVideoResponse returns the resolved playback location to the wrapper in the
+// shape the caller's player expects. VRChat invokes yt-dlp expecting a single
+// plain-text URL on stdout, so for that source (the default) we emit only the
+// proxied url. Resonite invokes yt-dlp with -J and parses the full document, so
+// resonite keeps the yt-dlp-like JSON metadata.
+func writeVideoResponse(w http.ResponseWriter, source string, metadata ytdlpMetadata) {
+	if source == "resonite" {
+		writeJSON(w, metadata)
+		return
+	}
+	playURL, _ := stringField(metadata, "url")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = fmt.Fprint(w, playURL)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

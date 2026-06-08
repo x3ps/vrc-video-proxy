@@ -54,6 +54,40 @@ func TestGetVideoHandlerCacheHitReturnsVideoURL(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
+	// VRChat expects a single plain-text URL on stdout, not JSON.
+	if got, want := rec.Header().Get("Content-Type"), "text/plain; charset=utf-8"; got != want {
+		t.Fatalf("Content-Type = %q, want %q", got, want)
+	}
+	wantURL := "http://127.0.0.1:8080/video/" + id + ".mp4"
+	if got := rec.Body.String(); got != wantURL {
+		t.Fatalf("body = %q, want %q", got, wantURL)
+	}
+}
+
+func TestGetVideoHandlerResoniteCacheHitReturnsJSON(t *testing.T) {
+	srv := newTestServer(t)
+
+	const sourceURL = "https://example.com/watch?v=1"
+	id := cacheID(sourceURL)
+	path, err := srv.cache.Path(id)
+	if err != nil {
+		t.Fatalf("cache.Path returned error: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("cached-bytes"), 0o644); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/getvideo?url=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3D1&avpro=false&source=resonite", nil)
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+
+	srv.getVideoHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	// Resonite invokes yt-dlp with -J and parses the full JSON document.
 	var got map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
@@ -106,16 +140,10 @@ func TestGetVideoHandlerCacheMissStartsJobAndReturnsLiveURL(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v", err)
-	}
+	// VRChat expects a single plain-text URL on stdout, not JSON.
 	wantURL := "http://127.0.0.1:8080/live/" + id + ".mp4"
-	if got["url"] != wantURL {
-		t.Fatalf("url = %q, want %q", got["url"], wantURL)
-	}
-	if got["title"] != "Video Title" {
-		t.Fatalf("title = %q, want Video Title", got["title"])
+	if got := rec.Body.String(); got != wantURL {
+		t.Fatalf("body = %q, want %q", got, wantURL)
 	}
 
 	if _, ok := srv.jobs.getJob(id); !ok {

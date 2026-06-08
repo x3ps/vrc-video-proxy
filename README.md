@@ -2,7 +2,8 @@
 
 A small Go HTTP server that sits between VRChat (or any AVPro/Unity-based player)
 and the internet. A yt-dlp-replacement *wrapper* asks this server for a video; the
-server extracts stream info with yt-dlp, returns yt-dlp-like JSON, caches the video
+server extracts stream info with yt-dlp, returns a playable URL (or yt-dlp-like
+JSON for Resonite), caches the video
 on disk, and serves the cached file back over HTTP with full `Range` support.
 
 The same binary can also run as a Steam launch-options wrapper that starts the
@@ -23,8 +24,12 @@ VRChat ──> yt-dlp wrapper ──> GET /api/getvideo?url=...   (this server)
 
 - **Cache id** is a SHA-256 of the (lightly normalized) source URL, hex-encoded —
   stable and filename-safe (`<id>.mp4`).
-- **Cache hit:** the server returns yt-dlp-like JSON whose `url` points at
-  `http://<host>/video/<id>.mp4`, served from disk with HEAD/Range/206 support.
+- **Response format.** VRChat invokes yt-dlp expecting a single plain-text URL on
+  stdout, so for `source=vrchat` (the default) the server returns just the resolved
+  `url` as `text/plain`. Resonite invokes yt-dlp with `-J` and parses the full
+  document, so `source=resonite` gets the yt-dlp-like JSON instead.
+- **Cache hit:** the server points `url` at `http://<host>/video/<id>.mp4`, served
+  from disk with HEAD/Range/206 support.
 - **Cache miss:** the server runs yt-dlp to get metadata and a single *progressive*
   stream URL, starts a background download job (deduplicated per cache id), and
   returns `url = http://<host>/live/<id>.mp4`. `/live` streams the bytes to the
@@ -50,7 +55,7 @@ VRChat ──> yt-dlp wrapper ──> GET /api/getvideo?url=...   (this server)
 | Method      | Path                  | Description |
 |-------------|-----------------------|-------------|
 | GET         | `/health`             | Liveness check, returns `ok`. |
-| GET         | `/api/getvideo`       | Query: `url` (required, absolute http/https), `avpro` (bool), `source` (default `vrchat`). Returns yt-dlp-like JSON. |
+| GET         | `/api/getvideo`       | Query: `url` (required, absolute http/https), `avpro` (bool), `source` (default `vrchat`). Returns a plain-text URL for `vrchat`, or yt-dlp-like JSON for `resonite`. |
 | GET, HEAD   | `/video/<id>.mp4`     | Serves a **finished** cached file via `http.ServeContent`: HEAD, `Range`, `206 Partial Content`, `Content-Length`, `Content-Range`, `Accept-Ranges: bytes`, `Content-Type: video/mp4`. |
 | GET, HEAD   | `/live/<id>.mp4`      | Streams a download-in-progress. In **sparse mode** it honors `Range`/`206`/`Content-Range` and back-fills on seek; in the **sequential fallback** it streams from offset 0 with `Accept-Ranges: none`. If the download has already finished, it transparently serves the cached file with full Range support. |
 | GET, HEAD   | `/hls/manifest`       | Query: `t` (a signed token carrying an upstream manifest URL + headers). Fetches a **live** HLS or DASH manifest, rewrites/﻿converts it to HLS pointing back at this server, and returns it (`application/vnd.apple.mpegurl`, `Cache-Control: no-store`). |

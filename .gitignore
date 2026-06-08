@@ -5,3 +5,4 @@ yt-dlp.exe
 # Local cache / scratch
 /cache/
 *.part
+youtube_cookies.txt

@@ -44,37 +44,37 @@ jobs:
       matrix:
         target:
           - name: server-linux-amd64
-            package: server
+            package: cmd/server
             goos: linux
             goarch: amd64
             binary: vrc-video-proxy-server
             archive: tar.gz
           - name: server-linux-arm64
-            package: server
+            package: cmd/server
             goos: linux
             goarch: arm64
             binary: vrc-video-proxy-server
             archive: tar.gz
           - name: server-windows-amd64
-            package: server
+            package: cmd/server
             goos: windows
             goarch: amd64
             binary: vrc-video-proxy-server.exe
             archive: zip
           - name: server-windows-arm64
-            package: server
+            package: cmd/server
             goos: windows
             goarch: arm64
             binary: vrc-video-proxy-server.exe
             archive: zip
           - name: wrapper-windows-amd64
-            package: wrapper
+            package: cmd/wrapper
             goos: windows
             goarch: amd64
             binary: yt-dlp.exe
             archive: zip
           - name: wrapper-windows-arm64
-            package: wrapper
+            package: cmd/wrapper
             goos: windows
             goarch: arm64
             binary: yt-dlp.exe

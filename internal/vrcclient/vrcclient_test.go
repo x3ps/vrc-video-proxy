@@ -1,4 +1,4 @@
-package main
+package vrcclient
 
 import (
 	"bytes"
@@ -10,14 +10,14 @@ import (
 	"testing"
 )
 
-func TestParseWrapperRequestDetectsVRChatAVPro(t *testing.T) {
-	req, err := parseWrapperRequest([]string{
+func TestParseRequestDetectsVRChatAVPro(t *testing.T) {
+	req, err := ParseRequest([]string{
 		"-J",
 		"--no-playlist",
 		"https://example.com/watch?v=123",
 	})
 	if err != nil {
-		t.Fatalf("parseWrapperRequest returned error: %v", err)
+		t.Fatalf("ParseRequest returned error: %v", err)
 	}
 	if req.URL != "https://example.com/watch?v=123" {
 		t.Fatalf("URL = %q", req.URL)
@@ -30,15 +30,15 @@ func TestParseWrapperRequestDetectsVRChatAVPro(t *testing.T) {
 	}
 }
 
-func TestParseWrapperRequestDetectsUnityAndResonite(t *testing.T) {
-	req, err := parseWrapperRequest([]string{
+func TestParseRequestDetectsUnityAndResonite(t *testing.T) {
+	req, err := ParseRequest([]string{
 		"-f",
 		"best[protocol^=http]",
 		"--flat-playlist",
 		"https://example.com/video",
 	})
 	if err != nil {
-		t.Fatalf("parseWrapperRequest returned error: %v", err)
+		t.Fatalf("ParseRequest returned error: %v", err)
 	}
 	if req.AVPro {
 		t.Fatal("AVPro = true, want false")
@@ -48,20 +48,21 @@ func TestParseWrapperRequestDetectsUnityAndResonite(t *testing.T) {
 	}
 }
 
-func TestParseWrapperRequestRequiresURL(t *testing.T) {
-	if _, err := parseWrapperRequest([]string{"-J", "--no-playlist"}); err == nil {
-		t.Fatal("parseWrapperRequest returned nil error, want error")
+func TestParseRequestRequiresURL(t *testing.T) {
+	if _, err := ParseRequest([]string{"-J", "--no-playlist"}); err == nil {
+		t.Fatal("ParseRequest returned nil error, want error")
 	}
 }
 
-func TestGetVideoEndpoint(t *testing.T) {
-	endpoint, err := getVideoEndpoint("http://127.0.0.1:8080/base/", wrapperRequest{
+func TestClientEndpoint(t *testing.T) {
+	c := New("http://127.0.0.1:8080/base/", nil)
+	endpoint, err := c.endpoint(Request{
 		URL:    "https://example.com/watch?v=1&x=2",
 		AVPro:  false,
 		Source: "vrchat",
 	})
 	if err != nil {
-		t.Fatalf("getVideoEndpoint returned error: %v", err)
+		t.Fatalf("endpoint returned error: %v", err)
 	}
 
 	if !strings.HasPrefix(endpoint, "http://127.0.0.1:8080/base/api/getvideo?") {
@@ -78,7 +79,16 @@ func TestGetVideoEndpoint(t *testing.T) {
 	}
 }
 
-func TestFetchVideoWritesServerResponse(t *testing.T) {
+func TestClientEndpointRejectsBadServerURL(t *testing.T) {
+	for _, server := range []string{"", "://nohost", "ftp://host:21"} {
+		c := New(server, nil)
+		if _, err := c.endpoint(Request{URL: "https://example.com/v"}); err == nil {
+			t.Fatalf("endpoint(%q) = nil error, want error", server)
+		}
+	}
+}
+
+func TestClientResolveReturnsServerResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/getvideo" {
 			t.Fatalf("path = %q, want /api/getvideo", r.URL.Path)
@@ -92,36 +102,36 @@ func TestFetchVideoWritesServerResponse(t *testing.T) {
 		if got := r.URL.Query().Get("source"); got != "vrchat" {
 			t.Fatalf("source query = %q", got)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"url": "http://127.0.0.1/video.mp4"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": "http://127.0.0.1/stream/x.mp4"})
 	}))
 	defer ts.Close()
 
-	body, err := fetchVideo(context.Background(), ts.Client(), ts.URL, wrapperRequest{
+	body, err := New(ts.URL, ts.Client()).Resolve(context.Background(), Request{
 		URL:    "https://example.com/video",
 		AVPro:  true,
 		Source: "vrchat",
 	})
 	if err != nil {
-		t.Fatalf("fetchVideo returned error: %v", err)
+		t.Fatalf("Resolve returned error: %v", err)
 	}
 	if !bytes.Contains(body, []byte(`"url"`)) {
 		t.Fatalf("body = %q, want JSON response", body)
 	}
 }
 
-func TestFetchVideoReportsServerError(t *testing.T) {
+func TestClientResolveReportsServerError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad url", http.StatusBadRequest)
 	}))
 	defer ts.Close()
 
-	_, err := fetchVideo(context.Background(), ts.Client(), ts.URL, wrapperRequest{
+	_, err := New(ts.URL, ts.Client()).Resolve(context.Background(), Request{
 		URL:    "https://example.com/video",
 		AVPro:  true,
 		Source: "vrchat",
 	})
 	if err == nil {
-		t.Fatal("fetchVideo returned nil error, want error")
+		t.Fatal("Resolve returned nil error, want error")
 	}
 	if !strings.Contains(err.Error(), "bad url") {
 		t.Fatalf("error = %q, want body included", err.Error())

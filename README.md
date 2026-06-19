@@ -95,6 +95,17 @@ level is `debug` it also appends to a `wrapper.log` file next to the wrapper
 executable, so a debugging user gets a persistent record even though VRChat gives
 the wrapper no console.
 
+Wrapper-only playback options can be set per process with `VRCVP_OPTION_*`
+environment variables. The wrapper forwards them to `/api/getvideo` as `vrcvp_*`
+query parameters, e.g. `VRCVP_OPTION_TRANSCODE=true` becomes
+`vrcvp_transcode=true`. If the source video URL already contains a `vrcvp_*`
+parameter, the wrapper removes it from the source URL and forwards it separately;
+per-URL values override `VRCVP_OPTION_*` defaults.
+
+```sh
+VRCVP_OPTION_TRANSCODE=true ./yt-dlp 'https://example.com/watch?v=1'
+```
+
 ## Trying it out
 
 ```sh

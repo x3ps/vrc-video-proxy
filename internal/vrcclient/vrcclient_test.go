@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,65 @@ func TestParseRequestDetectsUnityAndResonite(t *testing.T) {
 	}
 }
 
+func TestParseRequestExtractsWrapperQueryOptions(t *testing.T) {
+	req, err := ParseRequest([]string{
+		"-J",
+		"https://example.com/watch?v=123&vrcvp_transcode=true&quality=hd&vrcvp_profile=avpro&vrcvp_profile=fallback",
+	})
+	if err != nil {
+		t.Fatalf("ParseRequest returned error: %v", err)
+	}
+
+	if got, want := req.URL, "https://example.com/watch?quality=hd&v=123"; got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+	if got := req.Options["vrcvp_transcode"]; len(got) != 1 || got[0] != "true" {
+		t.Fatalf("vrcvp_transcode = %#v, want [true]", got)
+	}
+	if got := req.Options["vrcvp_profile"]; len(got) != 2 || got[0] != "avpro" || got[1] != "fallback" {
+		t.Fatalf("vrcvp_profile = %#v, want [avpro fallback]", got)
+	}
+}
+
+func TestOptionsFromEnvironment(t *testing.T) {
+	got := OptionsFromEnvironment([]string{
+		"VRCVP_OPTION_TRANSCODE=true",
+		"VRCVP_OPTION_PROFILE=avpro",
+		"VRCVP_OPTION_EMPTY=",
+		"VRCVP_SERVER_URL=http://127.0.0.1:8080",
+		"NOT_VRCVP_OPTION=value",
+	})
+
+	if got.Get("vrcvp_transcode") != "true" {
+		t.Fatalf("vrcvp_transcode = %q, want true", got.Get("vrcvp_transcode"))
+	}
+	if got.Get("vrcvp_profile") != "avpro" {
+		t.Fatalf("vrcvp_profile = %q, want avpro", got.Get("vrcvp_profile"))
+	}
+	if _, ok := got["vrcvp_empty"]; ok {
+		t.Fatalf("vrcvp_empty present in %#v, want empty env values ignored", got)
+	}
+}
+
+func TestMergeOptionsLetsOverridesWin(t *testing.T) {
+	got := MergeOptions(
+		url.Values{
+			"vrcvp_transcode": {"false"},
+			"vrcvp_profile":   {"env"},
+		},
+		url.Values{
+			"vrcvp_transcode": {"true"},
+		},
+	)
+
+	if values := got["vrcvp_transcode"]; len(values) != 1 || values[0] != "true" {
+		t.Fatalf("vrcvp_transcode = %#v, want [true]", values)
+	}
+	if values := got["vrcvp_profile"]; len(values) != 1 || values[0] != "env" {
+		t.Fatalf("vrcvp_profile = %#v, want [env]", values)
+	}
+}
+
 func TestParseRequestRequiresURL(t *testing.T) {
 	if _, err := ParseRequest([]string{"-J", "--no-playlist"}); err == nil {
 		t.Fatal("ParseRequest returned nil error, want error")
@@ -76,6 +136,37 @@ func TestClientEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(endpoint, "url=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3D1%26x%3D2") {
 		t.Fatalf("endpoint = %q, missing encoded url", endpoint)
+	}
+}
+
+func TestClientEndpointIncludesWrapperOptions(t *testing.T) {
+	c := New("http://127.0.0.1:8080", nil)
+	endpoint, err := c.endpoint(Request{
+		URL:    "https://example.com/watch?v=1",
+		AVPro:  true,
+		Source: "vrchat",
+		Options: url.Values{
+			"vrcvp_transcode": {"true"},
+			"vrcvp_profile":   {"avpro", "fallback"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("endpoint returned error: %v", err)
+	}
+
+	values, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("url.Parse returned error: %v", err)
+	}
+	query := values.Query()
+	if got := query.Get("url"); got != "https://example.com/watch?v=1" {
+		t.Fatalf("url query = %q", got)
+	}
+	if got := query["vrcvp_transcode"]; len(got) != 1 || got[0] != "true" {
+		t.Fatalf("vrcvp_transcode query = %#v, want [true]", got)
+	}
+	if got := query["vrcvp_profile"]; len(got) != 2 || got[0] != "avpro" || got[1] != "fallback" {
+		t.Fatalf("vrcvp_profile query = %#v, want [avpro fallback]", got)
 	}
 }
 

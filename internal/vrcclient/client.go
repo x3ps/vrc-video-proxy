@@ -85,6 +85,11 @@ func (c *Client) endpoint(req Request) (string, error) {
 	query.Set("url", req.URL)
 	query.Set("avpro", fmt.Sprintf("%t", req.AVPro))
 	query.Set("source", req.Source)
+	for key, values := range req.Options {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
 	base.RawQuery = query.Encode()
 	return base.String(), nil
 }

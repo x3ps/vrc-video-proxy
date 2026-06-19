@@ -39,6 +39,7 @@ func run(args []string, stdout, stderr io.Writer, httpClient *http.Client) int {
 		logger.Error("failed to parse arguments", "error", err, "args", args)
 		return 1
 	}
+	req.Options = vrcclient.MergeOptions(vrcclient.OptionsFromEnvironment(os.Environ()), req.Options)
 	logger.Debug("parsed request", "url", req.URL, "avpro", req.AVPro, "source", req.Source)
 
 	body, err := vrcclient.New(serverURL, httpClient).Resolve(context.Background(), req)

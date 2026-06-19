@@ -1,14 +1,15 @@
 package extractor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os/exec"
+	"strings"
 	"time"
+
+	"github.com/lrstanley/go-ytdlp"
 
 	"vrc-video-proxy/internal/config"
 	"vrc-video-proxy/internal/logging"
@@ -68,20 +69,21 @@ func (r *Runner) Extract(ctx context.Context, rawURL string) (Extraction, error)
 
 	r.logger.Debug("running yt-dlp", "url", logging.RedactURL(rawURL))
 
-	cmd := exec.CommandContext(ctx, r.path, r.commandArgs(rawURL)...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	output, err := cmd.Output()
+	res, err := r.command().Run(ctx, r.runArgs(rawURL)...)
 	if ctx.Err() != nil {
 		return Extraction{}, fmt.Errorf("yt-dlp timed out: %w", ctx.Err())
 	}
 	if err != nil {
-		return Extraction{}, fmt.Errorf("yt-dlp failed: %s", stderr.String())
+		// On a process failure go-ytdlp still returns a populated result, so
+		// prefer the raw stderr; fall back to the wrapped error otherwise.
+		if res != nil && res.Stderr != "" {
+			return Extraction{}, fmt.Errorf("yt-dlp failed: %s", strings.TrimSpace(res.Stderr))
+		}
+		return Extraction{}, fmt.Errorf("yt-dlp failed: %w", err)
 	}
 
 	var metadata Metadata
-	if err := json.Unmarshal(output, &metadata); err != nil {
+	if err := json.Unmarshal([]byte(res.Stdout), &metadata); err != nil {
 		return Extraction{}, fmt.Errorf("failed to parse yt-dlp JSON: %w", err)
 	}
 
@@ -97,15 +99,29 @@ func (r *Runner) Extract(ctx context.Context, rawURL string) (Extraction, error)
 	}, nil
 }
 
-func (r *Runner) commandArgs(rawURL string) []string {
-	args := []string{"-J", "--no-playlist", "--no-warnings", "-f", r.format}
-	args = append(args, r.extraArgs...)
+// command builds the go-ytdlp command with the configured flags. It points at
+// the system yt-dlp binary via SetExecutable; we never auto-download.
+func (r *Runner) command() *ytdlp.Command {
+	cmd := ytdlp.New().
+		SetExecutable(r.path).
+		DumpSingleJSON(). // -J
+		NoPlaylist().     // --no-playlist
+		NoWarnings().     // --no-warnings
+		Format(r.format)  // -f
 	if r.cookiesFile != "" {
-		args = append(args, "--cookies", r.cookiesFile)
+		cmd.Cookies(r.cookiesFile) // --cookies
 	}
 	if r.proxy != "" {
-		args = append(args, "--proxy", r.proxy)
+		cmd.Proxy(r.proxy) // --proxy
 	}
+	return cmd
+}
+
+// runArgs is the variadic tail passed to Run: the raw extraArgs passthrough
+// followed by our own "--" end-of-options guard and the URL. go-ytdlp appends
+// these verbatim after all builder flags and adds no "--" of its own.
+func (r *Runner) runArgs(rawURL string) []string {
+	args := append([]string{}, r.extraArgs...)
 	return append(args, "--", rawURL)
 }
 

@@ -1,9 +1,10 @@
 package extractor
 
 import (
+	"context"
 	"io"
 	"log/slog"
-	"reflect"
+	"slices"
 	"testing"
 
 	"vrc-video-proxy/internal/config"
@@ -37,6 +38,12 @@ func TestExtractHeaders(t *testing.T) {
 	}
 }
 
+// argv builds the full process argument list go-ytdlp would execute, so tests
+// can assert on the real command without spawning yt-dlp.
+func argv(r *Runner, rawURL string) []string {
+	return r.command().BuildCommand(context.Background(), r.runArgs(rawURL)...).Args
+}
+
 func TestRunnerCommandArgsIncludeExtraArgs(t *testing.T) {
 	r := New(config.Config{
 		YtdlpFormat: "bestvideo+bestaudio/best",
@@ -48,27 +55,54 @@ func TestRunnerCommandArgsIncludeExtraArgs(t *testing.T) {
 		Proxy:       "socks5://127.0.0.1:1080",
 	}, discardLogger())
 
-	got := r.commandArgs("https://example.com/watch?v=abc")
-	want := []string{
-		"-J", "--no-playlist", "--no-warnings", "-f", "bestvideo+bestaudio/best",
-		"--add-headers", "User-Agent: Mozilla/5.0",
-		"--extractor-args", "youtube:player_client=android",
+	got := argv(r, "https://example.com/watch?v=abc")
+
+	// go-ytdlp does not guarantee the relative order of builder flags, so check
+	// for presence of each flag/value rather than an exact slice.
+	for _, want := range []string{
+		"--dump-single-json", "--no-playlist", "--no-warnings",
 		"--cookies", "/tmp/cookies.txt",
 		"--proxy", "socks5://127.0.0.1:1080",
-		"--", "https://example.com/watch?v=abc",
+		"--add-headers", "User-Agent: Mozilla/5.0",
+		"--extractor-args", "youtube:player_client=android",
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("argv missing %q: %#v", want, got)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("commandArgs = %#v, want %#v", got, want)
+	assertFlagValue(t, got, "--format", "bestvideo+bestaudio/best")
+
+	// The URL must remain the verbatim tail, guarded by our own "--".
+	if got[len(got)-1] != "https://example.com/watch?v=abc" || got[len(got)-2] != "--" {
+		t.Fatalf("argv = %#v, want it to end with -- <url>", got)
 	}
 }
 
 func TestRunnerDefaultsFormat(t *testing.T) {
 	r := New(config.Config{}, discardLogger())
-	got := r.commandArgs("https://example.com/v")
-	// The format selector is the 5th element (after -J, --no-playlist, --no-warnings, -f).
-	if got[4] != progressiveFormat {
-		t.Fatalf("default format = %q, want progressiveFormat", got[4])
+	got := argv(r, "https://example.com/v")
+	assertFlagValue(t, got, "--format", progressiveFormat)
+}
+
+// assertFlagValue checks that flag appears in argv immediately followed by value.
+func assertFlagValue(t *testing.T, argv []string, flag, value string) {
+	t.Helper()
+	for i, a := range argv {
+		if a == flag {
+			if i+1 < len(argv) && argv[i+1] == value {
+				return
+			}
+			t.Fatalf("%s = %q, want %q", flag, argvAt(argv, i+1), value)
+		}
 	}
+	t.Fatalf("argv missing %s: %#v", flag, argv)
+}
+
+func argvAt(argv []string, i int) string {
+	if i < len(argv) {
+		return argv[i]
+	}
+	return ""
 }
 
 func TestFindStreamURLUsesTopLevelURL(t *testing.T) {
